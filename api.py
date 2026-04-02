@@ -301,14 +301,12 @@ def unified_image_generation(model=None):
     
     data = request.get_json(silent=True) or {}
     
-    # === РЕЖИМ ШПИОНА: СМОТРИМ ЧТО ШЛЕТ ТАВЕРНА ===
+    # Оставляем легкий лог, чтобы всегда видеть, что пришло от Таверны
     print("\n[DEBUG] Сырые данные от клиента:")
     print(json.dumps(data, indent=2, ensure_ascii=False))
-    # ===============================================
     
     is_gemini_format = False
     prompt = data.get('prompt')
-    
     requested_model = data.get('model') or model or "nano-banana-pro"
     
     reference_images_b64 = []
@@ -333,30 +331,36 @@ def unified_image_generation(model=None):
         except Exception:
             pass
 
-    # === НОВАЯ ЛОГИКА: ВСКРЫВАЕМ ХИТРЫЕ ЗАПРОСЫ ТАВЕРНЫ ===
+    # === РАСПАКОВКА ЛЮБЫХ ФОРМАТОВ ТАВЕРНЫ ===
     requested_size = data.get('size')
     requested_aspect = data.get('aspect_ratio')
 
-    # Вдруг Таверна запихнула весь свой лог прямо в текстовую строку prompt? Проверяем!
+    # Проверка формата Gemini API
+    gen_config = data.get('generationConfig', {})
+    img_config = gen_config.get('imageConfig', {})
+    
+    if not requested_aspect:
+        requested_aspect = img_config.get('aspectRatio')
+    if not requested_size:
+        requested_size = img_config.get('imageSize')
+
+    # Проверка спрятанного JSON внутри строки
     if isinstance(prompt, str) and prompt.strip().startswith('{') and prompt.strip().endswith('}'):
         try:
             hidden_data = json.loads(prompt)
-            prompt = hidden_data.get('prompt', prompt) # Вытаскиваем чистый текст
-            
-            # Ищем формат внутри этого спрятанного JSON
+            prompt = hidden_data.get('prompt', prompt) 
             requested_size = hidden_data.get('image_size') or hidden_data.get('size') or requested_size
             requested_aspect = hidden_data.get('aspect_ratio') or requested_aspect
-            print("\n[*] Бинго! Распаковали JSON, спрятанный внутри промпта!")
         except Exception:
             pass
             
     if not prompt or not str(prompt).strip():
         prompt = "A highly detailed, photorealistic masterpiece"
 
-    # Зачищаем переносы строк, чтобы Гугл не подавился и не обрезал промпт на первом же энтере
+    # Зачищаем переносы строк, чтобы Гугл не отрезал хвост промпта
     prompt = str(prompt).replace('\n', ' ').replace('\r', ' ')
     
-    # Формируем спасительный префикс и клеим В НАЧАЛО
+    # Формируем спасительный префикс и клеим строго В НАЧАЛО
     format_instructions = []
     if requested_aspect:
         format_instructions.append(f"Aspect ratio: {requested_aspect}")
@@ -368,7 +372,6 @@ def unified_image_generation(model=None):
         print(f"[*] Успешно приклеили формат в начало: {format_instructions}")
     else:
         print("\n[!] ВНИМАНИЕ: Скрипт так и не нашел настроек формата в запросе от клиента!")
-    # ========================================================
 
     image_path = generate_image_core(prompt, reference_images_b64=reference_images_b64, model_name=requested_model)
     
