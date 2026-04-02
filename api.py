@@ -376,7 +376,7 @@ def unified_image_generation(model=None):
     image_path = generate_image_core(prompt, reference_images_b64=reference_images_b64, model_name=requested_model)
     
     if not image_path or not os.path.exists(image_path):
-        return jsonify({"error": {"message": "Failed to generate image", "type": "server_error"}}), 500
+        return jsonify({"error": {"message": "Failed to generate image, try relaunching with --reauth flag.", "type": "server_error"}}), 500
 
     created_timestamp = int(time.time())
     
