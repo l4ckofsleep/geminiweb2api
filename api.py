@@ -187,7 +187,7 @@ def download_blob_via_batchexecute(snlm0e, blob, chat_id, r_id, rc_id, prompt):
     return None
 
 def generate_image_core(prompt, reference_images_b64=None, model_name="nano-banana-pro"):
-    print(f"\n[*] Старт генерации: {prompt}")
+    print(f"\n[*] Старт генерации: {prompt[:150]}... [ПРОМПТ ОБРЕЗАН ДЛЯ ЛОГА]")
     print(f"[*] Выбранная модель: {model_name}")
 
     image_part = "null"
@@ -300,6 +300,12 @@ def unified_image_generation(model=None):
     init_session()
     
     data = request.get_json(silent=True) or {}
+    
+    # === РЕЖИМ ШПИОНА: СМОТРИМ ЧТО ШЛЕТ ТАВЕРНА ===
+    print("\n[DEBUG] Сырые данные от клиента:")
+    print(json.dumps(data, indent=2, ensure_ascii=False))
+    # ===============================================
+    
     is_gemini_format = False
     prompt = data.get('prompt')
     
@@ -327,13 +333,30 @@ def unified_image_generation(model=None):
         except Exception:
             pass
 
+    # === НОВАЯ ЛОГИКА: ВСКРЫВАЕМ ХИТРЫЕ ЗАПРОСЫ ТАВЕРНЫ ===
+    requested_size = data.get('size')
+    requested_aspect = data.get('aspect_ratio')
+
+    # Вдруг Таверна запихнула весь свой лог прямо в текстовую строку prompt? Проверяем!
+    if isinstance(prompt, str) and prompt.strip().startswith('{') and prompt.strip().endswith('}'):
+        try:
+            hidden_data = json.loads(prompt)
+            prompt = hidden_data.get('prompt', prompt) # Вытаскиваем чистый текст
+            
+            # Ищем формат внутри этого спрятанного JSON
+            requested_size = hidden_data.get('image_size') or hidden_data.get('size') or requested_size
+            requested_aspect = hidden_data.get('aspect_ratio') or requested_aspect
+            print("\n[*] Бинго! Распаковали JSON, спрятанный внутри промпта!")
+        except Exception:
+            pass
+            
     if not prompt or not str(prompt).strip():
         prompt = "A highly detailed, photorealistic masterpiece"
 
-    # --- НОВАЯ ЧАСТЬ: ЛОВИМ ПАРАМЕТРЫ ФОРМАТА ОТ SILLYTAVERN ---
-    requested_size = data.get('size')
-    requested_aspect = data.get('aspect_ratio')
+    # Зачищаем переносы строк, чтобы Гугл не подавился и не обрезал промпт на первом же энтере
+    prompt = str(prompt).replace('\n', ' ').replace('\r', ' ')
     
+    # Формируем спасительный префикс и клеим В НАЧАЛО
     format_instructions = []
     if requested_aspect:
         format_instructions.append(f"Aspect ratio: {requested_aspect}")
@@ -341,9 +364,11 @@ def unified_image_generation(model=None):
         format_instructions.append(f"Resolution: {requested_size}")
         
     if format_instructions:
-        prompt = f"{prompt}\n\n[SYSTEM INSTRUCTION: MUST USE FORMAT - {', '.join(format_instructions)}]"
-        print(f"[*] Перехватили формат из настроек: {format_instructions}")
-    # -----------------------------------------------------------
+        prompt = f"[SYSTEM INSTRUCTION: MUST USE FORMAT - {', '.join(format_instructions)}] {prompt}"
+        print(f"[*] Успешно приклеили формат в начало: {format_instructions}")
+    else:
+        print("\n[!] ВНИМАНИЕ: Скрипт так и не нашел настроек формата в запросе от клиента!")
+    # ========================================================
 
     image_path = generate_image_core(prompt, reference_images_b64=reference_images_b64, model_name=requested_model)
     
