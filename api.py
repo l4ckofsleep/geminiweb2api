@@ -330,6 +330,21 @@ def unified_image_generation(model=None):
     if not prompt or not str(prompt).strip():
         prompt = "A highly detailed, photorealistic masterpiece"
 
+    # --- НОВАЯ ЧАСТЬ: ЛОВИМ ПАРАМЕТРЫ ФОРМАТА ОТ SILLYTAVERN ---
+    requested_size = data.get('size')
+    requested_aspect = data.get('aspect_ratio')
+    
+    format_instructions = []
+    if requested_aspect:
+        format_instructions.append(f"Aspect ratio: {requested_aspect}")
+    if requested_size:
+        format_instructions.append(f"Resolution: {requested_size}")
+        
+    if format_instructions:
+        prompt = f"{prompt}\n\n[SYSTEM INSTRUCTION: MUST USE FORMAT - {', '.join(format_instructions)}]"
+        print(f"[*] Перехватили формат из настроек: {format_instructions}")
+    # -----------------------------------------------------------
+
     image_path = generate_image_core(prompt, reference_images_b64=reference_images_b64, model_name=requested_model)
     
     if not image_path or not os.path.exists(image_path):
