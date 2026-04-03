@@ -66,6 +66,7 @@ def keep_alive_worker():
     """Фоновая задача для поддержания активности сессии (Heartbeat)"""
     while True:
         try:
+            # Спим 20 минут перед каждым пингом
             time.sleep(1200) 
             print("\n[*] Keep-alive: Проверка активности сессии...")
             resp = GLOBAL_SESSION.get("https://gemini.google.com/app", timeout=30)
@@ -168,42 +169,6 @@ def find_longest_string(obj):
             if len(candidate) > len(longest): longest = candidate
     return longest
 
-# === ИСПРАВЛЕННЫЙ ПАРСЕР С УМНЫМ ПРЕРЫВАНИЕМ ===
-def fetch_stream_patient(url, data, headers=None, stage_name=""):
-    raw_text = ""
-    start_time = time.time()
-    timeout_sec = 150 # Оставляем запас до 150 сек, но будем прерываться раньше
-    
-    # Подготавливаем аргументы для запроса
-    kwargs = {"data": data, "stream": True, "timeout": (30, 150)}
-    if headers:
-        kwargs["headers"] = headers
-        
-    try:
-        resp = GLOBAL_SESSION.post(url, **kwargs)
-        for line in resp.iter_lines(decode_unicode=True):
-            if line:
-                raw_text += line + "\n"
-                
-                # Если видим успешную картинку (ссылку или блоб) — рубим связь и отдаем результат!
-                if '"$' in raw_text and len(raw_text) > 1000: 
-                    if re.search(r'"(\$[A-Za-z0-9+/\-=_]{50,})"', raw_text): break
-                elif 'lh3.googleusercontent.com' in raw_text: 
-                    break
-                    
-                # Если видим маркеры ошибки — тоже прерываем, нечего ждать
-                if '400,null,null,null,3]' in raw_text or 'er",null,null,null,null,400' in raw_text: 
-                    break
-                    
-            if time.time() - start_time > timeout_sec: 
-                print(f"[!] Тайм-аут {timeout_sec} сек. достигнут для {stage_name}.")
-                break
-                
-        resp.close()
-    except Exception as e: 
-        print(f"[!] Стрим {stage_name} прерван: {e}")
-    return raw_text
-
 # ====================================================================
 # ГЕНЕРАЦИЯ ТЕКСТА
 # ====================================================================
@@ -225,6 +190,7 @@ def generate_text_core(prompt, model_name="nano-banana-pro", file_content=None):
         snlm0e = match.group(1)
     except Exception: return None
 
+    # Определяем ID
     mode_id = "56fdd199312815e2" # Flash
     if "thinking" in model_name.lower(): 
         mode_id = "e051ce1aa80aa576"
@@ -245,6 +211,7 @@ def generate_text_core(prompt, model_name="nano-banana-pro", file_content=None):
     payload_str = f"""[[{json.dumps(prompt)},0,null,{doc_part},null,null,0],["ru"],["","","",null,null,null,null,null,null,""],"",{json.dumps(candidate_id)},null,[1],1,null,null,1,0,null,null,null,null,null,[[0]],0,null,null,null,null,null,null,null,null,1,null,null,[4],null,null,null,null,null,null,null,null,null,null,[1],null,null,null,null,null,null,null,null,null,null,null,0,null,null,null,null,null,{json.dumps(device_id)},null,[],null,null,null,null,null,null,2]"""
     req_data = {"f.req": json.dumps([None, payload_str], separators=(',', ':')), "at": snlm0e}
 
+    # Заголовок 2026 года для переключения
     req_headers = GLOBAL_SESSION.headers.copy()
     req_headers["x-goog-ext-525001261-jspb"] = f'[1,null,null,null,"{mode_id}",null,null,null,null,null,null,2]'
 
@@ -343,6 +310,22 @@ def download_blob_via_batchexecute(snlm0e, blob, chat_id, r_id, rc_id, prompt):
     except Exception: pass
     return None
 
+def fetch_stream_patient(url, data, stage_name=""):
+    raw_text = ""
+    start_time = time.time()
+    timeout_sec = 150 
+    try:
+        resp = GLOBAL_SESSION.post(url, data=data, stream=True, timeout=(30, 150))
+        for chunk in resp.iter_content(chunk_size=None, decode_unicode=True):
+            if chunk: raw_text += chunk
+            if '"$' in raw_text and len(raw_text) > 1000: 
+                if re.search(r'"(\$[A-Za-z0-9+/\-=_]{50,})"', raw_text): break
+            elif 'lh3.googleusercontent.com' in raw_text: break
+            if '400,null,null,null,3]' in raw_text or 'er",null,null,null,null,400' in raw_text: break
+            if time.time() - start_time > timeout_sec: break
+    except Exception: pass
+    return raw_text
+
 def generate_image_core(prompt, reference_images_b64=None, model_name="nano-banana-pro"):
     print(f"\n[*] Старт генерации картинки...")
     image_part = "null"
@@ -371,56 +354,36 @@ def generate_image_core(prompt, reference_images_b64=None, model_name="nano-bana
     device_id = str(uuid.uuid4()).upper()
     candidate_1 = uuid.uuid4().hex
     
-    is_pro_model = "pro" in model_name.lower()
-    mode_id = "e6fa609c3fa255c0" if is_pro_model else "56fdd199312815e2"
+    payload_1_str = f"""[[{json.dumps(prompt)},0,null,{image_part},null,null,0],["ru"],["","","",null,null,null,null,null,null,""],"",{json.dumps(candidate_1)},null,[1],1,null,null,1,0,null,null,null,null,null,[[0]],0,null,null,null,null,null,null,null,null,1,null,null,[4],null,1,null,null,null,null,null,null,null,null,[1],null,null,null,null,null,null,null,null,null,null,null,0,null,null,null,null,null,{json.dumps(device_id)},null,[],null,null,null,null,null,null,2]"""
+    req_data = {"f.req": json.dumps([None, payload_1_str], separators=(',', ':')), "at": snlm0e}
     
-    # Добавляем обязательные заголовки 2026 года для обхода Legacy
+    mode_id = "e6fa609c3fa255c0" if "pro" in model_name.lower() else "56fdd199312815e2"
     req_headers = GLOBAL_SESSION.headers.copy()
     req_headers["x-goog-ext-525001261-jspb"] = f'[1,null,null,null,"{mode_id}",null,null,null,null,null,null,2]'
     
-    # ИСПРАВЛЕНИЕ: Пытаемся выбить Pro картинку прямо на 1 этапе!
-    if is_pro_model:
-        msg_block = f'{json.dumps(prompt)},0,null,{image_part},null,null,0,null,null,[null,null,null,null,null,null,[null,[1]]]'
-    else:
-        msg_block = f'{json.dumps(prompt)},0,null,{image_part},null,null,0'
-        
-    payload_1_str = f"""[[{msg_block}],["ru"],["","","",null,null,null,null,null,null,""],"",{json.dumps(candidate_1)},null,[1],1,null,null,1,0,null,null,null,null,null,[[0]],0,null,null,null,null,null,null,null,null,1,null,null,[4],null,1,null,null,null,null,null,null,null,null,[1],null,null,null,null,null,null,null,null,null,null,null,0,null,null,null,null,null,{json.dumps(device_id)},null,[],null,null,null,null,null,null,2]"""
-    req_data = {"f.req": json.dumps([None, payload_1_str], separators=(',', ':')), "at": snlm0e}
-    
-    # Запускаем 1 этап (И обязательно передаем req_headers)
-    raw_1 = fetch_stream_patient(stream_url, req_data, headers=req_headers, stage_name="Этап 1") 
-    
-    urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', raw_1)
-    blobs = re.findall(r'"(\$[A-Za-z0-9+/\-=_]{50,})"', raw_1)
-    
+    raw_1 = fetch_stream_patient(stream_url, req_data, stage_name="Этап 1") 
     chat_id_m = re.search(r'(c_[a-f0-9]{16})', raw_1)
     r_id_m = re.search(r'(r_[a-f0-9]{16,32})', raw_1)
     rc_id_m = re.search(r'(rc_[a-f0-9]{16,32})', raw_1)
+    tokens = re.findall(r'(Aw[A-Za-z0-9_-]{20,}|![A-Za-z0-9_-]{20,})', raw_1)
+    
     chat_id = chat_id_m.group(1) if chat_id_m else ""
     r_id = r_id_m.group(1) if r_id_m else ""
     rc_id = rc_id_m.group(1) if rc_id_m else ""
-    
-    final_url = None
-    
-    # УМНЫЙ ПРОПУСК: Если Гугл выдал картинку на 1 этапе, нам не нужен 2 этап!
-    if urls or blobs:
-        print("[+] Картинка успешно сгенерирована на 1 этапе!")
-        final_url = urls[-1] if urls else (download_blob_via_batchexecute(snlm0e, blobs[-1], chat_id, r_id, rc_id, prompt) if blobs else None)
-    else:
-        print("[-] На 1 этапе только текст. Запуск 2 этапа (Redo with Pro)...")
-        tokens = re.findall(r'(Aw[A-Za-z0-9_-]{20,}|![A-Za-z0-9_-]{20,})', raw_1)
-        state_token = max(tokens, key=len) if tokens else ""
+    state_token = max(tokens, key=len) if tokens else ""
 
-        if is_pro_model and chat_id:
-            candidate_2 = uuid.uuid4().hex  
-            payload_2_str = f"""[[{json.dumps(prompt)},0,null,{image_part},null,null,0,null,null,[null,null,null,null,null,null,[null,[1]]]],["ru"],[{json.dumps(chat_id)},"","",null,null,null,null,null,null,""],{json.dumps(state_token)},{json.dumps(candidate_2)},null,[1],1,null,null,1,0,null,null,null,null,null,[[0]],0,null,null,null,null,null,null,null,null,1,null,null,[4],null,1,null,null,null,null,null,null,null,null,[1],null,null,null,null,null,null,null,null,null,null,null,0,null,null,null,null,null,{json.dumps(device_id)},null,[],null,null,null,null,null,null,2,null,null,null,7]"""
-            req_2 = {"f.req": json.dumps([None, payload_2_str], separators=(',', ':')), "at": snlm0e}
-            
-            raw_target = fetch_stream_patient(stream_url, req_2, headers=req_headers, stage_name="Этап 2")
-            
-            urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', raw_target)
-            blobs = re.findall(r'"(\$[A-Za-z0-9+/\-=_]{50,})"', raw_target)
-            final_url = urls[-1] if urls else (download_blob_via_batchexecute(snlm0e, blobs[-1], chat_id, r_id, rc_id, prompt) if blobs else None)
+    is_pro_model = "pro" in model_name.lower()
+    if is_pro_model and chat_id:
+        candidate_2 = uuid.uuid4().hex  
+        payload_2_str = f"""[[{json.dumps(prompt)},0,null,{image_part},null,null,0,null,null,[null,null,null,null,null,null,[null,[1]]]],["ru"],[{json.dumps(chat_id)},"","",null,null,null,null,null,null,""],{json.dumps(state_token)},{json.dumps(candidate_2)},null,[1],1,null,null,1,0,null,null,null,null,null,[[0]],0,null,null,null,null,null,null,null,null,1,null,null,[4],null,1,null,null,null,null,null,null,null,null,[1],null,null,null,null,null,null,null,null,null,null,null,0,null,null,null,null,null,{json.dumps(device_id)},null,[],null,null,null,null,null,null,2,null,null,null,7]"""
+        req_2 = {"f.req": json.dumps([None, payload_2_str], separators=(',', ':')), "at": snlm0e}
+        raw_target = fetch_stream_patient(stream_url, req_2, stage_name="Этап 2")
+    else:
+        raw_target = raw_1
+    
+    urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', raw_target)
+    blobs = re.findall(r'"(\$[A-Za-z0-9+/\-=_]{50,})"', raw_target)
+    final_url = urls[-1] if urls else (download_blob_via_batchexecute(snlm0e, blobs[-1], chat_id, r_id, rc_id, prompt) if blobs else None)
     
     if final_url:
         final_url = re.sub(r'=[swh]\d+.*$', '', final_url)
@@ -555,19 +518,25 @@ def chat_completions():
     if not generated_text:
          return jsonify({"error": {"message": "Failed to generate text", "type": "server_error"}}), 500
 
+    # === УМНАЯ ОЧИСТКА ДУБЛЕЙ И ПЕРЕНОСЫ СТРОК ===
     prefill_text = ""
     if messages and messages[-1].get("role") == "assistant":
         prefill_text = messages[-1].get("content", "").strip()
         
     if prefill_text:
+        # Отрезаем дубликат префилла от ответа Гугла
         if generated_text.startswith(prefill_text):
             generated_text = generated_text[len(prefill_text):]
             
+        # Очищаем лишние табы и пробелы, но ОСТАВЛЯЕМ переносы строк
         generated_text = generated_text.lstrip(" \t")
         
+        # Если префилл был тегом форматирования (например, <think>),
+        # жестко гарантируем, что шаблон начнется с новой строки!
         if prefill_text.startswith("<") and prefill_text.endswith(">"):
             if not generated_text.startswith("\n"):
                 generated_text = "\n" + generated_text
+    # ============================================
 
     return jsonify({
         "id": f"chatcmpl-{uuid.uuid4().hex}",
@@ -589,6 +558,7 @@ def chat_completions():
 if __name__ == "__main__":
     init_session()
     
+    # Запускаем Heartbeat перед основным циклом Flask
     heartbeat_thread = threading.Thread(target=keep_alive_worker, daemon=True)
     heartbeat_thread.start()
     
