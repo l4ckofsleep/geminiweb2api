@@ -23,7 +23,11 @@ def run_auth_mobile():
     print("1. Установи Kiwi Browser или Firefox из Google Play.")
     print("2. Установи расширение 'Cookie-Editor' через меню дополнений.")
     print("3. Зайди на gemini.google.com и залогинься.")
-    print("4. Открой расширение Cookie-Editor и скопируй ТРИ кука: __Secure-1PSID, __Secure-1PSIDTS и SAPISID.")
+    print("4. ⚡ ВАЖНО: Открой меню браузера (три точки) и включи 'Версия для ПК' (Desktop site)!")
+    print("5. Дождись перезагрузки страницы, открой Cookie-Editor и скопируй ТРИ кука:")
+    print("   __Secure-1PSID, __Secure-1PSIDTS и SAPISID.")
+    print("-" * 50)
+    print("💡 Если какого-то кука все равно нет, попробуй отправить боту любое сообщение и проверить снова.")
     print("-" * 50)
 
     psid = input("👉 Вставь значение __Secure-1PSID: ").strip()
@@ -31,7 +35,7 @@ def run_auth_mobile():
     sapisid = input("👉 Вставь значение SAPISID: ").strip()
 
     if not psid or not psidts or not sapisid:
-        print("[!] Ошибка: нужны все три токена. Запусти скрипт заново.")
+        print("[!] Ошибка: нужны все три токена. Внимательно прочитай инструкцию выше и запусти скрипт заново.")
         sys.exit(1)
 
     # Сохраняем в таком же формате, как это делает Playwright на ПК
