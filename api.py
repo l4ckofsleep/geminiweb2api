@@ -66,7 +66,7 @@ def keep_alive_worker():
     """Фоновая задача для поддержания активности сессии (Heartbeat)"""
     while True:
         try:
-            time.sleep(1200) 
+            time.sleep(300) # Уменьшено с 1200 до 300 секунд (каждые 5 минут)
             print("\n[*] Keep-alive: Проверка активности сессии...")
             resp = GLOBAL_SESSION.get("https://gemini.google.com/app", timeout=30)
             if resp.status_code == 200:
@@ -168,13 +168,11 @@ def find_longest_string(obj):
             if len(candidate) > len(longest): longest = candidate
     return longest
 
-# === ИСПРАВЛЕННЫЙ ПАРСЕР С УМНЫМ ПРЕРЫВАНИЕМ ===
 def fetch_stream_patient(url, data, headers=None, stage_name=""):
     raw_text = ""
     start_time = time.time()
-    timeout_sec = 150 # Оставляем запас до 150 сек, но будем прерываться раньше
+    timeout_sec = 150
     
-    # Подготавливаем аргументы для запроса
     kwargs = {"data": data, "stream": True, "timeout": (30, 150)}
     if headers:
         kwargs["headers"] = headers
@@ -185,13 +183,11 @@ def fetch_stream_patient(url, data, headers=None, stage_name=""):
             if line:
                 raw_text += line + "\n"
                 
-                # Если видим успешную картинку (ссылку или блоб) — рубим связь и отдаем результат!
                 if '"$' in raw_text and len(raw_text) > 1000: 
                     if re.search(r'"(\$[A-Za-z0-9+/\-=_]{50,})"', raw_text): break
                 elif 'lh3.googleusercontent.com' in raw_text: 
                     break
                     
-                # Если видим маркеры ошибки — тоже прерываем, нечего ждать
                 if '400,null,null,null,3]' in raw_text or 'er",null,null,null,null,400' in raw_text: 
                     break
                     
@@ -204,9 +200,6 @@ def fetch_stream_patient(url, data, headers=None, stage_name=""):
         print(f"[!] Стрим {stage_name} прерван: {e}")
     return raw_text
 
-# ====================================================================
-# ГЕНЕРАЦИЯ ТЕКСТА
-# ====================================================================
 def generate_text_core(prompt, model_name="nano-banana-pro", file_content=None):
     print(f"\n[*] Старт генерации текста...")
     doc_part = "null"
@@ -282,9 +275,6 @@ def generate_text_core(prompt, model_name="nano-banana-pro", file_content=None):
         print(f"[!] Ошибка соединения: {e}")
         return None
 
-# ====================================================================
-# ГЕНЕРАЦИЯ КАРТИНОК 
-# ====================================================================
 def upload_image_to_gemini(session, image_bytes):
     mime_type = "image/jpeg"
     ext = "jpg"
@@ -374,11 +364,9 @@ def generate_image_core(prompt, reference_images_b64=None, model_name="nano-bana
     is_pro_model = "pro" in model_name.lower()
     mode_id = "e6fa609c3fa255c0" if is_pro_model else "56fdd199312815e2"
     
-    # Добавляем обязательные заголовки 2026 года для обхода Legacy
     req_headers = GLOBAL_SESSION.headers.copy()
     req_headers["x-goog-ext-525001261-jspb"] = f'[1,null,null,null,"{mode_id}",null,null,null,null,null,null,2]'
     
-    # ИСПРАВЛЕНИЕ: Пытаемся выбить Pro картинку прямо на 1 этапе!
     if is_pro_model:
         msg_block = f'{json.dumps(prompt)},0,null,{image_part},null,null,0,null,null,[null,null,null,null,null,null,[null,[1]]]'
     else:
@@ -387,7 +375,6 @@ def generate_image_core(prompt, reference_images_b64=None, model_name="nano-bana
     payload_1_str = f"""[[{msg_block}],["ru"],["","","",null,null,null,null,null,null,""],"",{json.dumps(candidate_1)},null,[1],1,null,null,1,0,null,null,null,null,null,[[0]],0,null,null,null,null,null,null,null,null,1,null,null,[4],null,1,null,null,null,null,null,null,null,null,[1],null,null,null,null,null,null,null,null,null,null,null,0,null,null,null,null,null,{json.dumps(device_id)},null,[],null,null,null,null,null,null,2]"""
     req_data = {"f.req": json.dumps([None, payload_1_str], separators=(',', ':')), "at": snlm0e}
     
-    # Запускаем 1 этап (И обязательно передаем req_headers)
     raw_1 = fetch_stream_patient(stream_url, req_data, headers=req_headers, stage_name="Этап 1") 
     
     urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', raw_1)
@@ -402,7 +389,6 @@ def generate_image_core(prompt, reference_images_b64=None, model_name="nano-bana
     
     final_url = None
     
-    # УМНЫЙ ПРОПУСК: Если Гугл выдал картинку на 1 этапе, нам не нужен 2 этап!
     if urls or blobs:
         print("[+] Картинка успешно сгенерирована на 1 этапе!")
         final_url = urls[-1] if urls else (download_blob_via_batchexecute(snlm0e, blobs[-1], chat_id, r_id, rc_id, prompt) if blobs else None)
@@ -434,9 +420,6 @@ def generate_image_core(prompt, reference_images_b64=None, model_name="nano-bana
         except Exception: pass
     return None
 
-# ====================================================================
-# РОУТИНГ FLASK
-# ====================================================================
 @app.route('/v1/models', methods=['GET', 'OPTIONS'])
 @app.route('/v1beta/models', methods=['GET', 'OPTIONS'])
 def list_models():
