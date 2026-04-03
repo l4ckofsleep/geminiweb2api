@@ -8,6 +8,7 @@ import uuid
 import time
 import base64
 import hashlib
+import threading
 
 app = Flask(__name__)
 CORS(app) 
@@ -60,6 +61,24 @@ def init_session():
     except Exception as e:
         print(f"[!] Ошибка чтения файла сессии: {e}")
         return False
+
+def keep_alive_worker():
+    """Фоновая задача для поддержания активности сессии (Heartbeat)"""
+    while True:
+        try:
+            # Спим 20 минут перед каждым пингом
+            time.sleep(1200) 
+            print("\n[*] Keep-alive: Проверка активности сессии...")
+            resp = GLOBAL_SESSION.get("https://gemini.google.com/app", timeout=30)
+            if resp.status_code == 200:
+                if '"SNlM0e":"' in resp.text or '["SNlM0e","' in resp.text:
+                    print("[+] Keep-alive: Сессия активна и успешно продлена.")
+                else:
+                    print("[!] Keep-alive: Сессия кажется невалидной (рекомендуется --refresh).")
+            else:
+                print(f"[!] Keep-alive: Ошибка сервера {resp.status_code}")
+        except Exception as e:
+            print(f"[!] Keep-alive: Ошибка соединения: {e}")
 
 def set_model_preference(session, snlm0e, mode_id):
     print(f"[*] Отправка сигнала переключения модели (Mode ID: {mode_id})...")
@@ -231,7 +250,7 @@ def generate_text_core(prompt, model_name="nano-banana-pro", file_content=None):
         return None
 
 # ====================================================================
-# ГЕНЕРАЦИЯ КАРТИНОК
+# ГЕНЕРАЦИЯ КАРТИНОК 
 # ====================================================================
 def upload_image_to_gemini(session, image_bytes):
     mime_type = "image/jpeg"
@@ -538,5 +557,10 @@ def chat_completions():
 
 if __name__ == "__main__":
     init_session()
+    
+    # Запускаем Heartbeat перед основным циклом Flask
+    heartbeat_thread = threading.Thread(target=keep_alive_worker, daemon=True)
+    heartbeat_thread.start()
+    
     print("\n[*] Geminiweb2api запущен (Порт: 1717)")
     app.run(host='0.0.0.0', port=1717, threaded=True)

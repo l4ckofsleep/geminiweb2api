@@ -2,3 +2,4 @@ google_state.json
 generated_images/
 __pycache__/
 .env
+chrome_profile/

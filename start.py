@@ -2,8 +2,10 @@ import os
 import sys
 import json
 import subprocess
+import shutil
 
 STATE_FILE = "google_state.json"
+PROFILE_DIR = "chrome_profile"
 
 def is_mobile():
     # Проверяем наличие специфичных для Android и Termux переменных окружения
@@ -49,7 +51,6 @@ def run_auth_pc():
     print("💻 ОБНАРУЖЕН ПК (Windows/Mac/Linux)")
     print("="*50)
     print("[*] Запуск автоматической авторизации через Playwright...")
-    # Вызываем второй скрипт, чтобы не тащить тяжелый Playwright в мобильную версию
     subprocess.run([sys.executable, "auth.py"])
 
 def run_api():
@@ -62,10 +63,19 @@ def main():
     print("=" * 40)
 
     if "--reauth" in sys.argv:
-        print("[!] Запрошена принудительная переавторизация.")
+        print("\n[!] Запрошена ЖЕСТКАЯ переавторизация (--reauth).")
         if os.path.exists(STATE_FILE):
             os.remove(STATE_FILE)
             print(f"[*] Старый файл {STATE_FILE} удален.")
+        if os.path.exists(PROFILE_DIR):
+            shutil.rmtree(PROFILE_DIR, ignore_errors=True)
+            print(f"[*] Профиль браузера очищен. Потребуется полный вход.")
+            
+    elif "--refresh" in sys.argv:
+        print("\n[!] Запрошено МЯГКОЕ обновление сессии (--refresh).")
+        if os.path.exists(STATE_FILE):
+            os.remove(STATE_FILE)
+            print(f"[*] Старый файл {STATE_FILE} удален. Профиль браузера сохранен.")
     
     if not os.path.exists(STATE_FILE):
         if is_mobile():
