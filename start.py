@@ -24,25 +24,23 @@ def run_auth_mobile():
     print("2. Установи расширение 'Cookie-Editor' через меню дополнений.")
     print("3. Зайди на gemini.google.com и залогинься.")
     print("4. ⚡ ВАЖНО: Открой меню браузера (три точки) и включи 'Версия для ПК' (Desktop site)!")
-    print("5. Дождись перезагрузки страницы, открой Cookie-Editor и скопируй ТРИ кука:")
-    print("   __Secure-1PSID, __Secure-1PSIDTS и SAPISID.")
+    print("5. Дождись перезагрузки страницы, открой Cookie-Editor и скопируй ДВА кука:")
+    print("   __Secure-1PSID и SAPISID.")
     print("-" * 50)
     print("💡 Если какого-то кука все равно нет, попробуй отправить боту любое сообщение и проверить снова.")
     print("-" * 50)
 
     psid = input("👉 Вставь значение __Secure-1PSID: ").strip()
-    psidts = input("👉 Вставь значение __Secure-1PSIDTS: ").strip()
     sapisid = input("👉 Вставь значение SAPISID: ").strip()
 
-    if not psid or not psidts or not sapisid:
-        print("[!] Ошибка: нужны все три токена. Внимательно прочитай инструкцию выше и запусти скрипт заново.")
+    if not psid or not sapisid:
+        print("[!] Ошибка: нужны оба токена. Внимательно прочитай инструкцию выше и запусти скрипт заново.")
         sys.exit(1)
 
     # Сохраняем в таком же формате, как это делает Playwright на ПК
     state = {
         "cookies": [
             {"name": "__Secure-1PSID", "value": psid, "domain": ".google.com"},
-            {"name": "__Secure-1PSIDTS", "value": psidts, "domain": ".google.com"},
             {"name": "SAPISID", "value": sapisid, "domain": ".google.com"}
         ]
     }
