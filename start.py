@@ -59,7 +59,14 @@ def run_auth_pc():
 
 def run_api():
     print("\n[*] Запуск главного сервера API...")
-    subprocess.run([sys.executable, "api.py"])
+    args = [sys.executable, "api.py"]
+    
+    # Прокидываем флаг --temp, если он был при запуске
+    if "--temp" in sys.argv:
+        print("[*] Активирован режим ВРЕМЕННОГО ЧАТА (--temp)")
+        args.append("--temp")
+        
+    subprocess.run(args)
 
 def main():
     print("=" * 40)

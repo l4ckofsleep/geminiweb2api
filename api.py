@@ -9,6 +9,10 @@ import time
 import base64
 import hashlib
 import threading
+import sys
+
+# Проверяем наличие флага --temp
+IS_TEMP_CHAT = "--temp" in sys.argv
 
 app = Flask(__name__)
 CORS(app) 
@@ -66,7 +70,7 @@ def keep_alive_worker():
     """Фоновая задача для поддержания активности сессии (Heartbeat)"""
     while True:
         try:
-            time.sleep(300) # Уменьшено с 1200 до 300 секунд (каждые 5 минут)
+            time.sleep(300)
             print("\n[*] Keep-alive: Проверка активности сессии...")
             resp = GLOBAL_SESSION.get("https://gemini.google.com/app", timeout=30)
             if resp.status_code == 200:
@@ -168,6 +172,22 @@ def find_longest_string(obj):
             if len(candidate) > len(longest): longest = candidate
     return longest
 
+def format_thinking_blocks(text):
+    """Жестко форматирует блоки размышлений, убирая мусорные пробелы и нормализуя теги."""
+    if not text:
+        return text
+        
+    # Приводим открывающие теги <think> и <thinking> к единому виду
+    text = re.sub(r'(?i)[ \t]*<(think|thinking)>[ \t]*\n?', '<think>\n', text)
+    
+    # Жестко форматируем закрывающий тег
+    text = re.sub(r'(?i)\n?[ \t]*</(think|thinking)>[ \t]*\n?', '\n</think>\n\n', text)
+    
+    # Чистим возможные множественные пустые строки
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    
+    return text.strip()
+
 def fetch_stream_patient(url, data, headers=None, stage_name=""):
     raw_text = ""
     start_time = time.time()
@@ -235,7 +255,9 @@ def generate_text_core(prompt, model_name="nano-banana-pro", file_content=None):
     candidate_id = uuid.uuid4().hex
     device_id = str(uuid.uuid4()).upper()
 
-    payload_str = f"""[[{json.dumps(prompt)},0,null,{doc_part},null,null,0],["ru"],["","","",null,null,null,null,null,null,""],"",{json.dumps(candidate_id)},null,[1],1,null,null,1,0,null,null,null,null,null,[[0]],0,null,null,null,null,null,null,null,null,1,null,null,[4],null,null,null,null,null,null,null,null,null,null,[1],null,null,null,null,null,null,null,null,null,null,null,0,null,null,null,null,null,{json.dumps(device_id)},null,[],null,null,null,null,null,null,2]"""
+    temp_chat_flag = "1" if IS_TEMP_CHAT else "null"
+
+    payload_str = f"""[[{json.dumps(prompt)},0,null,{doc_part},null,null,0],["ru"],["","","",null,null,null,null,null,null,""],"",{json.dumps(candidate_id)},null,[1],1,null,null,1,0,null,null,null,null,null,[[0]],0,null,null,null,null,null,null,null,null,1,null,null,[4],null,null,null,null,null,null,null,null,null,null,[1],null,null,null,{temp_chat_flag},null,null,null,null,null,null,null,0,null,null,null,null,null,{json.dumps(device_id)},null,[],null,null,null,null,null,null,2]"""
     req_data = {"f.req": json.dumps([None, payload_str], separators=(',', ':')), "at": snlm0e}
 
     req_headers = GLOBAL_SESSION.headers.copy()
@@ -267,6 +289,10 @@ def generate_text_core(prompt, model_name="nano-banana-pro", file_content=None):
             print("[+] Текст успешно получен!")
             clean_text = re.sub(r'(?m)^\s*\\\s*$', '', full_text)
             clean_text = clean_text.replace('\\<', '<').replace('\\>', '>').replace('\\/', '/')
+            
+            # Применяем жесткое форматирование блоков thinking
+            clean_text = format_thinking_blocks(clean_text)
+            
             return clean_text.strip()
         
         print("[!] Ошибка: Сервер вернул ответ, но парсер не смог найти текст.")
@@ -372,7 +398,9 @@ def generate_image_core(prompt, reference_images_b64=None, model_name="nano-bana
     else:
         msg_block = f'{json.dumps(prompt)},0,null,{image_part},null,null,0'
         
-    payload_1_str = f"""[[{msg_block}],["ru"],["","","",null,null,null,null,null,null,""],"",{json.dumps(candidate_1)},null,[1],1,null,null,1,0,null,null,null,null,null,[[0]],0,null,null,null,null,null,null,null,null,1,null,null,[4],null,1,null,null,null,null,null,null,null,null,[1],null,null,null,null,null,null,null,null,null,null,null,0,null,null,null,null,null,{json.dumps(device_id)},null,[],null,null,null,null,null,null,2]"""
+    temp_chat_flag = "1" if IS_TEMP_CHAT else "null"
+        
+    payload_1_str = f"""[[{msg_block}],["ru"],["","","",null,null,null,null,null,null,""],"",{json.dumps(candidate_1)},null,[1],1,null,null,1,0,null,null,null,null,null,[[0]],0,null,null,null,null,null,null,null,null,1,null,null,[4],null,1,null,null,null,null,null,null,null,null,[1],null,null,null,{temp_chat_flag},null,null,null,null,null,null,null,0,null,null,null,null,null,{json.dumps(device_id)},null,[],null,null,null,null,null,null,2]"""
     req_data = {"f.req": json.dumps([None, payload_1_str], separators=(',', ':')), "at": snlm0e}
     
     raw_1 = fetch_stream_patient(stream_url, req_data, headers=req_headers, stage_name="Этап 1") 
@@ -399,7 +427,7 @@ def generate_image_core(prompt, reference_images_b64=None, model_name="nano-bana
 
         if is_pro_model and chat_id:
             candidate_2 = uuid.uuid4().hex  
-            payload_2_str = f"""[[{json.dumps(prompt)},0,null,{image_part},null,null,0,null,null,[null,null,null,null,null,null,[null,[1]]]],["ru"],[{json.dumps(chat_id)},"","",null,null,null,null,null,null,""],{json.dumps(state_token)},{json.dumps(candidate_2)},null,[1],1,null,null,1,0,null,null,null,null,null,[[0]],0,null,null,null,null,null,null,null,null,1,null,null,[4],null,1,null,null,null,null,null,null,null,null,[1],null,null,null,null,null,null,null,null,null,null,null,0,null,null,null,null,null,{json.dumps(device_id)},null,[],null,null,null,null,null,null,2,null,null,null,7]"""
+            payload_2_str = f"""[[{json.dumps(prompt)},0,null,{image_part},null,null,0,null,null,[null,null,null,null,null,null,[null,[1]]]],["ru"],[{json.dumps(chat_id)},"","",null,null,null,null,null,null,""],{json.dumps(state_token)},{json.dumps(candidate_2)},null,[1],1,null,null,1,0,null,null,null,null,null,[[0]],0,null,null,null,null,null,null,null,null,1,null,null,[4],null,1,null,null,null,null,null,null,null,null,[1],null,null,null,{temp_chat_flag},null,null,null,null,null,null,null,0,null,null,null,null,null,{json.dumps(device_id)},null,[],null,null,null,null,null,null,2,null,null,null,7]"""
             req_2 = {"f.req": json.dumps([None, payload_2_str], separators=(',', ':')), "at": snlm0e}
             
             raw_target = fetch_stream_patient(stream_url, req_2, headers=req_headers, stage_name="Этап 2")
