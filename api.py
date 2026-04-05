@@ -27,13 +27,18 @@ HEADERS = {
 
 GLOBAL_CLIENT = httpx.AsyncClient(headers=HEADERS, timeout=150.0, follow_redirects=True)
 
+def print_sys(msg):
+    """Кастомный принт для системных сообщений с таймстемпом"""
+    t = time.strftime("%H:%M:%S")
+    print(f"[{t}] {msg}")
+
 async def init_session():
-    print("[*] Загрузка сессии из google_state.json...")
+    print_sys("[*] Загрузка сессии из google_state.json...")
     GLOBAL_CLIENT.cookies.clear()
     
     state_file = "google_state.json"
     if not os.path.exists(state_file):
-        print("[!] Ошибка: Файл google_state.json не найден.")
+        print_sys("[!] Ошибка: Файл google_state.json не найден.")
         return False
         
     try:
@@ -56,32 +61,32 @@ async def init_session():
             hash_str = f"{timestamp} {sapisid} https://gemini.google.com"
             sha1 = hashlib.sha1(hash_str.encode()).hexdigest()
             GLOBAL_CLIENT.headers.update({"Authorization": f"SAPISIDHASH {timestamp}_{sha1}"})
-            print("[+] Сессия успешно загружена из файла!")
+            print_sys("[+] Сессия успешно загружена из файла!")
             return True
         else:
-            print("[!] Внимание: В файле сессии не найдены нужные куки. Возможно, сессия устарела.")
+            print_sys("[!] Внимание: В файле сессии не найдены нужные куки. Возможно, сессия устарела.")
             return False
     except Exception as e:
-        print(f"[!] Ошибка чтения файла сессии: {e}")
+        print_sys(f"[!] Ошибка чтения файла сессии: {e}")
         return False
 
 async def keep_alive_worker():
     while True:
         try:
             await asyncio.sleep(300)
-            print("\n[*] Keep-alive: Проверка активности сессии...")
+            print_sys("[*] Keep-alive: Проверка активности сессии...")
             resp = await GLOBAL_CLIENT.get("https://gemini.google.com/app", timeout=30.0)
             if resp.status_code == 200:
                 if '"SNlM0e":"' in resp.text or '["SNlM0e","' in resp.text:
-                    print("[+] Keep-alive: Сессия активна и успешно продлена.")
+                    print_sys("[+] Keep-alive: Сессия активна и успешно продлена.")
                 else:
-                    print("[!] Keep-alive: Сессия кажется невалидной (рекомендуется --refresh).")
+                    print_sys("[!] Keep-alive: Сессия кажется невалидной (рекомендуется --refresh).")
             else:
-                print(f"[!] Keep-alive: Ошибка сервера {resp.status_code}")
+                print_sys(f"[!] Keep-alive: Ошибка сервера {resp.status_code}")
         except asyncio.CancelledError:
             break
         except Exception as e:
-            print(f"[!] Keep-alive: Ошибка соединения: {e}")
+            print_sys(f"[!] Keep-alive: Ошибка соединения: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -102,7 +107,7 @@ app.add_middleware(
 )
 
 async def set_model_preference(snlm0e, mode_id):
-    print(f"[*] Отправка сигнала переключения модели (Mode ID: {mode_id})...")
+    print_sys(f"[*] Отправка сигнала переключения модели (Mode ID: {mode_id})...")
     url = "https://gemini.google.com/_/BardChatUi/data/batchexecute?rpcids=L5adhe&rt=c"
     
     null_array = [None] * 99
@@ -119,16 +124,18 @@ async def set_model_preference(snlm0e, mode_id):
         resp = await GLOBAL_CLIENT.post(url, data=req_data, timeout=15.0)
         if resp.status_code == 200:
             if "er" in resp.text and "generic" not in resp.text:
-                print("[!] Сервер вернул 200, но внутри скрытая ошибка! Переключение могло не сработать.")
+                print_sys("[-] Сервер вернул 200, но внутри скрытая ошибка! Переключение могло не сработать.")
                 return False
-            print("[+] Модель на сервере (UI) успешно изменена!")
+            print_sys("[+] Модель на сервере (UI) успешно изменена!")
             return True
+        else:
+            print_sys(f"[❌] Ошибка смены модели: HTTP {resp.status_code}")
     except Exception as e:
-        print(f"[!] Исключение при переключении модели: {e}")
+        print_sys(f"[❌] Исключение при переключении модели: {e}")
     return False
 
 async def upload_document_to_gemini(text_content, filename="chat.json"):
-    print(f"[*] Выгрузка файла {filename} на сервера Google...")
+    print_sys(f"[*] Выгрузка файла истории {filename} на сервера Google...")
     url = "https://content-push.googleapis.com/upload/"
     file_bytes = text_content.encode('utf-8')
     mime_type = "text/plain" 
@@ -148,9 +155,14 @@ async def upload_document_to_gemini(text_content, filename="chat.json"):
     
     try:
         res = await GLOBAL_CLIENT.post(url, headers=headers_start, content=b"", timeout=15.0)
-        if res.status_code != 200: return None
+        if res.status_code != 200: 
+            print_sys(f"[❌] Ошибка загрузки документа (Старт): HTTP {res.status_code}")
+            return None
+        
         upload_url = res.headers.get("X-Goog-Upload-URL")
-        if not upload_url: return None
+        if not upload_url: 
+            print_sys("[❌] Ошибка: Гугл не выдал X-Goog-Upload-URL.")
+            return None
             
         headers_upload = {
             "Authority": "content-push.googleapis.com",
@@ -167,11 +179,14 @@ async def upload_document_to_gemini(text_content, filename="chat.json"):
             match = re.search(r'(/contrib_service/[a-zA-Z0-9_/\-\=]+)', resp_text)
             if match:
                 upload_id = match.group(1)
-                print(f"[+] Файл успешно загружен. Внутренний ID: {upload_id[:35]}...")
+                print_sys(f"[+] Файл успешно загружен. ID: {upload_id[:25]}...")
                 return upload_id
+            print_sys("[-] Файл загружен, но ID не распознан.")
             return resp_text.strip()
+        else:
+            print_sys(f"[❌] Ошибка загрузки документа (Финал): HTTP {res_upload.status_code}")
     except Exception as e:
-        print(f"[!] Исключение при загрузке документа: {e}")
+        print_sys(f"[❌] Исключение при загрузке документа: {e}")
     return None
 
 def is_garbage_node(text):
@@ -208,40 +223,34 @@ def find_actual_response(obj):
     return longest
 
 def format_blocks(text):
-    """Идеальное форматирование, поддерживающее и <think>, и <thinking>"""
     if not text: return text
-    
-    # 1. Срезаем внутренний мусор Гугла (длинные хэши базы64)
     text = re.sub(r'^[A-Za-z0-9_/\+\-]{40,}={0,2}[^\n]*\n*', '', text)
-    
-    # 2. Схлопываем дубли (например, если Таверна послала <thinking>, а Гугл следом выдал <think>)
-    # Эта регулярка найдет подряд идущие теги и оставит только самый первый
     text = re.sub(r'(?i)(<(?:think|thinking)>)[\s\n]*(?:<(?:think|thinking)>[\s\n]*)+', r'\1\n', text)
-    
-    # 3. ЖЕСТКО ставим перенос строки после открывающих тегов
     text = re.sub(r'(?i)(<think>|<thinking>)\s*', r'\1\n', text)
-    
-    # 4. ЖЕСТКО ставим перенос строки до и после закрывающих тегов
     text = re.sub(r'(?i)\s*(</think>|</thinking>)\s*', r'\n\1\n\n', text)
-    
-    # 5. Убираем лишние пустоты
     text = re.sub(r'\n{3,}', '\n\n', text)
-    
     return text.strip()
 
 async def generate_text_core(request: Request, prompt, model_name="nano-banana-pro", file_content=None):
-    print(f"\n[*] Старт генерации текста (Режим монолита)...")
+    print_sys("🚀 [ЭТАП 1] Подготовка данных...")
     doc_part = "null"
     if file_content:
         doc_id = await upload_document_to_gemini(file_content, filename="chat.json")
         if doc_id: doc_part = f'[[[{json.dumps(doc_id)},16,null,"application/json"],"chat.json"]]'
+        else: print_sys("⚠️ Предупреждение: Не удалось прикрепить историю (chat.json). Генерация продолжится без неё.")
 
+    print_sys("🔑 [ЭТАП 2] Получение токена авторизации (SNlM0e)...")
     try:
         resp = await GLOBAL_CLIENT.get("https://gemini.google.com/app", timeout=30.0)
         match = re.search(r'"SNlM0e":"(.*?)"', resp.text) or re.search(r'\["SNlM0e","(.*?)"\]', resp.text)
-        if not match: return None
+        if not match: 
+            print_sys("[❌] КРИТИЧЕСКАЯ ОШИБКА: Токен SNlM0e не найден. Куки протухли или Гугл требует капчу.")
+            return None
         snlm0e = match.group(1)
-    except Exception: return None
+        print_sys("[+] Токен успешно получен.")
+    except Exception as e: 
+        print_sys(f"[❌] Ошибка соединения при получении токена: {e}")
+        return None
 
     mode_id = "56fdd199312815e2" 
     if "thinking" in model_name.lower(): mode_id = "e051ce1aa80aa576"
@@ -262,14 +271,18 @@ async def generate_text_core(request: Request, prompt, model_name="nano-banana-p
     req_headers = GLOBAL_CLIENT.headers.copy()
     req_headers["x-goog-ext-525001261-jspb"] = f'[1,null,null,null,"{mode_id}",null,null,null,null,null,null,2]'
 
+    print_sys(f"📡 [ЭТАП 3] Отправка запроса в Google (Модель: {model_name}). Ожидание ответа...")
     try:
-        print("[*] Ожидание ответа от сервера Google...")
         full_text = ""
-        
         async with GLOBAL_CLIENT.stream("POST", stream_url, data=req_data, headers=req_headers, timeout=150.0) as resp:
+            
+            if resp.status_code != 200:
+                print_sys(f"[❌] ОШИБКА GOOGLE API: Сервер вернул статус HTTP {resp.status_code}")
+                return None
+                
             async for line in resp.aiter_lines():
                 if await request.is_disconnected():
-                    print("\n[!] 🛑 Клиент (Таверна) отменил запрос! ЖЕСТКО Разрываем соединение с Google.")
+                    print_sys("🛑 [ПРЕРВАНО] Клиент (Таверна) отменил запрос (нажата кнопка Stop). Разрываем соединение.")
                     return None
                     
                 if line:
@@ -288,14 +301,23 @@ async def generate_text_core(request: Request, prompt, model_name="nano-banana-p
                                             full_text = extracted
                     except Exception: continue
         
-        if full_text:
-            print("[+] Текст успешно получен!")
-            clean_text = re.sub(r'(?m)^\s*\\\s*$', '', full_text)
-            clean_text = clean_text.replace('\\<', '<').replace('\\>', '>').replace('\\/', '/')
-            return clean_text.strip()
+        print_sys("✅ [ЭТАП 4] Поток завершен. Анализ результата...")
+        
+        if not full_text:
+            print_sys("[❌] ОШИБКА: Гугл вернул абсолютно пустой текст!")
+            print_sys("    ℹ️ Возможные причины: Сработал жесткий NSFW-фильтр Гугла, либо структура промпта была отвергнута.")
+            return None
+            
+        print_sys(f"[+] Сырой текст успешно извлечен (Длина: {len(full_text)} символов).")
+        clean_text = re.sub(r'(?m)^\s*\\\s*$', '', full_text)
+        clean_text = clean_text.replace('\\<', '<').replace('\\>', '>').replace('\\/', '/')
+        return clean_text.strip()
+        
+    except httpx.ReadTimeout:
+        print_sys("[❌] ОШИБКА: Тайм-аут. Гугл думал слишком долго (более 150 сек).")
         return None
     except Exception as e:
-        print(f"[!] Ошибка соединения: {e}")
+        print_sys(f"[❌] КРИТИЧЕСКАЯ ОШИБКА при чтении потока: {e}")
         return None
 
 async def upload_image_to_gemini(image_bytes):
@@ -357,7 +379,7 @@ async def download_blob_via_batchexecute(snlm0e, blob, chat_id, r_id, rc_id, pro
     return None
 
 async def generate_image_core(request: Request, prompt, reference_images_b64=None, model_name="nano-banana-pro"):
-    print(f"\n[*] Старт генерации картинки...")
+    print_sys(f"\n[*] Старт генерации картинки...")
     image_part = "null"
     if reference_images_b64:
         ref_data_list = []
@@ -422,10 +444,10 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
     final_url = None
     
     if urls or blobs:
-        print("[+] Картинка успешно сгенерирована на 1 этапе!")
+        print_sys("[+] Картинка успешно сгенерирована на 1 этапе!")
         final_url = urls[-1] if urls else (await download_blob_via_batchexecute(snlm0e, blobs[-1], chat_id, r_id, rc_id, prompt) if blobs else None)
     else:
-        print("[-] На 1 этапе только текст. Запуск 2 этапа (Redo with Pro)...")
+        print_sys("[-] На 1 этапе только текст. Запуск 2 этапа (Redo with Pro)...")
         tokens = re.findall(r'(Aw[A-Za-z0-9_-]{20,}|![A-Za-z0-9_-]{20,})', raw_1)
         state_token = max(tokens, key=len) if tokens else ""
 
@@ -559,11 +581,15 @@ async def serve_image(filename: str):
 async def chat_completions(request: Request):
     if request.method == 'OPTIONS': return JSONResponse({})
     
+    print_sys(f"\n{'='*50}\n📥 НОВЫЙ ЗАПРОС ОТ ТАВЕРНЫ\n{'='*50}")
+    
     try: data = await request.json()
     except Exception: data = {}
     
     messages = data.get('messages', [])
-    if not messages: return JSONResponse({"error": "No messages provided"}, status_code=400)
+    if not messages: 
+        print_sys("[❌] Ошибка: Таверна прислала пустой список сообщений.")
+        return JSONResponse({"error": "No messages provided"}, status_code=400)
         
     chat_history = []
     for msg in messages:
@@ -581,34 +607,77 @@ async def chat_completions(request: Request):
     prefill_text = ""
     if messages and messages[-1].get("role") == "assistant":
         prefill_text = messages[-1].get("content", "").strip()
+        print_sys(f"[*] Обнаружен префилл от Таверны (Длина: {len(prefill_text)} символов).")
 
     # 1. Запрашиваем голый сырой текст у Гугла
     generated_text = await generate_text_core(request, safe_prompt, model_name=requested_model, file_content=file_content)
 
     if generated_text is None:
-        return JSONResponse({"error": {"message": "Request cancelled by user or failed", "type": "server_error"}}, status_code=500)
+        print_sys("[❌] ИТОГ: Генерация прервана или завершилась сбоем. Отправляем ошибку в Таверну.")
+        return JSONResponse({"error": {"message": "Request cancelled by user or failed (Check console logs)", "type": "server_error"}}, status_code=500)
 
-    # 2. Склеиваем префилл и ответ ДО форматирования
-    full_message = prefill_text + "\n" + generated_text if prefill_text else generated_text
+    print_sys("✨ [ЭТАП 5] Умное форматирование тегов и вычитание префилла...")
 
-    # 3. Идеально форматируем всю строку целиком (схлопываем дубли, если они появились на стыке)
-    full_message = format_blocks(full_message)
+    # 2. Очищаем текст от мусора Гугла (хэши базы64 в начале)
+    generated_text = re.sub(r'^[A-Za-z0-9_/\+\-]{40,}={0,2}[^\n]*\n*', '', generated_text)
 
-    # 4. Вычитаем из отформатированного текста наш префилл "в лоб"
+    # 3. Определяем, какой тег предпочитает юзер (по умолчанию <think>)
+    tag_name = "think"
+    if prefill_text and "<thinking>" in prefill_text.lower():
+        tag_name = "thinking"
+    elif "<thinking>" in generated_text.lower():
+        tag_name = "thinking"
+        
+    open_tag = f"<{tag_name}>"
+    close_tag = f"</{tag_name}>"
+
+    # 4. Унифицируем теги в сгенерированном ответе
+    generated_text = re.sub(r'(?i)<think>|<thinking>', open_tag, generated_text)
+    generated_text = re.sub(r'(?i)</think>|</thinking>', close_tag, generated_text)
+    
+    # 5. Вычитаем "эхо" (если Гугл полностью повторил префилл Таверны)
+    final_text = generated_text
     if prefill_text:
-        formatted_prefill = format_blocks(prefill_text)
-        if full_message.startswith(formatted_prefill):
-            final_text = full_message[len(formatted_prefill):]
+        # Для корректного сравнения временно приведем префилл к тому же тегу
+        norm_prefill = re.sub(r'(?i)<think>|<thinking>', open_tag, prefill_text)
+        
+        # Удаляем все пробелы для железобетонного сравнения строк
+        norm_gen_nospace = re.sub(r'\s', '', final_text)
+        norm_pre_nospace = re.sub(r'\s', '', norm_prefill)
+        
+        if norm_gen_nospace.startswith(norm_pre_nospace):
+            # Гугл вернул префилл целиком! Отрезаем его из ответа.
+            pre_chars_count = len(norm_pre_nospace)
+            chars_seen = 0
+            split_idx = 0
+            for i, char in enumerate(final_text):
+                if not char.isspace():
+                    chars_seen += 1
+                if chars_seen == pre_chars_count:
+                    split_idx = i + 1
+                    break
+            if split_idx > 0:
+                final_text = final_text[split_idx:].lstrip(' \t')
         else:
-            final_text = full_message
-            
-        # Гарантируем красивый перенос, если префилл заканчивался тегом (например, <thinking>)
-        if prefill_text.strip().endswith('>') and not final_text.startswith('\n'):
-            final_text = '\n' + final_text.lstrip(' \t')
-    else:
-        final_text = full_message
+            # Если Гугл не вернул весь префилл, но по привычке начал свой ответ 
+            # с открывающего тега (а Таверна уже послала его в префилле) — убиваем этот лишний тег.
+            if re.search(rf'(?i){open_tag}', norm_prefill) and final_text.lstrip().lower().startswith(open_tag.lower()):
+                final_text = re.sub(rf'(?i)^\s*{open_tag}\s*', '\n', final_text)
 
-    # 5. Возврат (Фейковый стриминг сохраняется ради кнопки Stop)
+    # 6. Жесткое форматирование переносов для закрывающего тега
+    final_text = re.sub(rf'(?i)\s*({close_tag})\s*', rf'\n\1\n\n', final_text)
+    final_text = re.sub(r'\n{3,}', '\n\n', final_text)
+    
+    # 7. Красивый стык: если префилл заканчивался тегом, гарантируем перенос перед текстом Гугла
+    if prefill_text and prefill_text.strip().endswith('>'):
+        if not final_text.startswith('\n'):
+            final_text = '\n' + final_text.lstrip(' \t')
+
+    final_text = final_text.rstrip()
+
+    print_sys(f"✅ [ЭТАП 6] Текст готов к отправке (Длина: {len(final_text)}). Маскируем под стриминг...")
+
+    # 8. Возврат
     if is_stream:
         async def sse_stream():
             cmpl_id = f"chatcmpl-{uuid.uuid4().hex}"
@@ -632,10 +701,12 @@ async def chat_completions(request: Request):
             }
             yield f"data: {json.dumps(final_chunk)}\n\n"
             yield "data: [DONE]\n\n"
+            print_sys(f"🏁 ЗАВЕРШЕНО. Сообщение доставлено в Таверну.\n{'='*50}")
             
         return StreamingResponse(sse_stream(), media_type='text/event-stream')
         
     else:
+        print_sys(f"🏁 ЗАВЕРШЕНО. Сообщение доставлено в Таверну (Без стрима).\n{'='*50}")
         return JSONResponse({
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
@@ -655,5 +726,5 @@ async def chat_completions(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    print("\n[*] Запуск FastAPI сервера (Порт: 1717)")
+    print_sys("\n[*] Запуск FastAPI сервера (Порт: 1717)")
     uvicorn.run("api:app", host="0.0.0.0", port=1717, log_level="warning")
