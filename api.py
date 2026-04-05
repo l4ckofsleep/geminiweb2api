@@ -13,6 +13,7 @@ import base64
 import hashlib
 import asyncio
 import sys
+import random
 
 # Парсинг аргументов
 IS_TEMP_CHAT = "--temp" in sys.argv
@@ -54,16 +55,19 @@ if PROXY_URL:
 
 GLOBAL_CLIENT = httpx.AsyncClient(**client_kwargs)
 
+# --- Глобальный кэш для снижения спама запросами ---
+CACHED_SNLM0E = None
+CURRENT_MODEL_ID = None
+
 def print_sys(msg):
     """Кастомный принт: пишет в консоль (затирая крутилку) и сохраняет в logs.txt"""
     t = time.strftime("%H:%M:%S")
     formatted_msg = f"[{t}] {msg}"
     
-    # \r возвращает каретку в начало, \033[K стирает строку до конца, чтобы не было артефактов от крутилки
+    # \r возвращает каретку в начало, \033[K стирает строку до конца
     sys.stdout.write(f"\r\033[K{formatted_msg}\n")
     sys.stdout.flush()
     
-    # Пишем в лог-файл
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(formatted_msg + "\n")
@@ -76,19 +80,41 @@ async def spinner_task(message="Ожидание ответа..."):
     i = 0
     try:
         while True:
-            # Рисуем крутилку (без перехода на новую строку)
             sys.stdout.write(f'\r\033[K[*] {chars[i]} {message}')
             sys.stdout.flush()
             i = (i + 1) % len(chars)
             await asyncio.sleep(0.1)
     except asyncio.CancelledError:
-        # При отмене задачи стираем крутилку с экрана
-        sys.stdout.write('\r\033[K')
-        sys.stdout.flush()
+        # Убрали принудительное затирание здесь, чтобы не стереть логи ошибок!
+        # Функция print_sys сама затрет крутилку перед выводом текста.
+        pass
+
+async def get_snlm0e(force_refresh=False):
+    """Умное получение токена авторизации с кэшированием"""
+    global CACHED_SNLM0E
+    if CACHED_SNLM0E and not force_refresh:
+        return CACHED_SNLM0E
+        
+    if IS_DEBUG: print_sys("[DEBUG] Скачивание главной страницы для получения токена SNlM0e...")
+    try:
+        resp = await GLOBAL_CLIENT.get("https://gemini.google.com/app", timeout=30.0)
+        match = re.search(r'"SNlM0e":"(.*?)"', resp.text) or re.search(r'\["SNlM0e","(.*?)"\]', resp.text)
+        if not match: 
+            print_sys("[❌] КРИТИЧЕСКАЯ ОШИБКА: Токен SNlM0e не найден. Куки протухли или нужен VPN.")
+            return None
+        CACHED_SNLM0E = match.group(1)
+        if IS_DEBUG: print_sys("[DEBUG] Токен SNlM0e успешно обновлен и кэширован.")
+        return CACHED_SNLM0E
+    except Exception as e: 
+        print_sys(f"[❌] Ошибка соединения при получении токена: {e}")
+        return None
 
 async def init_session():
     print_sys("[*] Загрузка сессии из google_state.json...")
     GLOBAL_CLIENT.cookies.clear()
+    global CACHED_SNLM0E, CURRENT_MODEL_ID
+    CACHED_SNLM0E = None
+    CURRENT_MODEL_ID = None
     
     state_file = "google_state.json"
     if not os.path.exists(state_file):
@@ -117,21 +143,13 @@ async def init_session():
             GLOBAL_CLIENT.headers.update({"Authorization": f"SAPISIDHASH {timestamp}_{sha1}"})
             print_sys("[+] Сессия загружена из файла. Проверяем валидность куков...")
             
-            # --- Стартовая проверка валидности сессии ---
-            try:
-                resp = await GLOBAL_CLIENT.get("https://gemini.google.com/app", timeout=30.0)
-                if resp.status_code == 200 and ('"SNlM0e":"' in resp.text or '["SNlM0e","' in resp.text):
-                    print_sys("[+] Отлично! Сессия валидна, доступ к Gemini разрешен.")
-                    return True
-                else:
-                    print_sys(f"[❌] ВНИМАНИЕ: Гугл отверг куки (Код: {resp.status_code}). Сессия протухла или нужен другой IP/VPN.")
-                    print_sys("    ℹ️ Рекомендуется перезапустить скрипт с флагом --reauth (Termux) или --refresh (ПК).")
-                    return False
-            except Exception as e:
-                print_sys(f"[⚠️] Не удалось проверить сессию при старте (ошибка сети): {e}")
-                return True # Позволяем запуститься, возможно сеть просто "мигнула"
-            # --------------------------------------------
-            
+            token = await get_snlm0e(force_refresh=True)
+            if token:
+                print_sys("[+] Отлично! Сессия валидна, доступ к Gemini разрешен.")
+                return True
+            else:
+                print_sys("[❌] ВНИМАНИЕ: Гугл отверг куки. Рекомендуется перезапуск с флагом --reauth.")
+                return False
         else:
             print_sys("[!] Внимание: В файле сессии не найдены нужные куки. Возможно, сессия устарела.")
             return False
@@ -140,22 +158,25 @@ async def init_session():
         return False
 
 async def keep_alive_worker():
+    """Умный фоновый воркер с плавающим интервалом (защита от анти-бота)"""
     while True:
         try:
-            await asyncio.sleep(300)
-            print_sys("[*] Keep-alive: Проверка активности сессии...")
-            resp = await GLOBAL_CLIENT.get("https://gemini.google.com/app", timeout=30.0)
-            if resp.status_code == 200:
-                if '"SNlM0e":"' in resp.text or '["SNlM0e","' in resp.text:
-                    print_sys("[+] Keep-alive: Сессия активна и успешно продлена.")
-                else:
-                    print_sys("[!] Keep-alive: Сессия кажется невалидной (рекомендуется --refresh).")
+            # Рандомная пауза от 4 до 8 минут (240 - 480 секунд)
+            sleep_time = random.randint(240, 480)
+            await asyncio.sleep(sleep_time)
+            
+            if IS_DEBUG: print_sys(f"[DEBUG] Keep-alive: Продление сессии (пауза была {sleep_time//60} мин)...")
+            
+            token = await get_snlm0e(force_refresh=True)
+            
+            if token:
+                if IS_DEBUG: print_sys("[DEBUG] Keep-alive: Сессия активна.")
             else:
-                print_sys(f"[!] Keep-alive: Ошибка сервера {resp.status_code}")
+                print_sys("[!] Keep-alive: Сессия убита Гуглом. Сделай --refresh.")
         except asyncio.CancelledError:
             break
-        except Exception as e:
-            print_sys(f"[!] Keep-alive: Ошибка соединения: {e}")
+        except Exception:
+            pass
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -167,13 +188,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# --- Глобальный обработчик неизвестных маршрутов (404) ---
+# Обработчик неизвестных маршрутов (404)
 @app.exception_handler(StarletteHTTPException)
 async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
     if exc.status_code == 404:
         print_sys(f"\n[⚠️] ПРЕДУПРЕЖДЕНИЕ: Неизвестный запрос! Кто-то стучится на {request.method} {request.url.path}")
     return JSONResponse({"error": "Not found"}, status_code=exc.status_code)
-# ---------------------------------------------------------
 
 app.add_middleware(
     CORSMiddleware,
@@ -205,14 +225,12 @@ async def set_model_preference(snlm0e, mode_id):
                 return False
             if IS_DEBUG: print_sys("[+] Модель на сервере (UI) успешно изменена!")
             return True
-        else:
-            print_sys(f"[❌] Ошибка смены модели: HTTP {resp.status_code}")
     except Exception as e:
         if IS_DEBUG: print_sys(f"[❌] Исключение при переключении модели: {e}")
     return False
 
 async def upload_document_to_gemini(text_content, filename="chat.json"):
-    print_sys(f"[*] Выгрузка файла истории {filename} на сервера Google...")
+    if IS_DEBUG: print_sys(f"[DEBUG] Выгрузка файла истории {filename} на сервера Google...")
     url = "https://content-push.googleapis.com/upload/"
     file_bytes = text_content.encode('utf-8')
     mime_type = "text/plain" 
@@ -256,12 +274,9 @@ async def upload_document_to_gemini(text_content, filename="chat.json"):
             match = re.search(r'(/contrib_service/[a-zA-Z0-9_/\-\=]+)', resp_text)
             if match:
                 upload_id = match.group(1)
-                print_sys(f"[+] Файл успешно загружен. ID: {upload_id[:25]}...")
+                print_sys(f"[+] Файл истории успешно прикреплен (ID: {upload_id[:15]}...)")
                 return upload_id
-            print_sys("[-] Файл загружен, но ID не распознан.")
             return resp_text.strip()
-        else:
-            print_sys(f"[❌] Ошибка загрузки документа (Финал): HTTP {res_upload.status_code}")
     except Exception as e:
         print_sys(f"[❌] Исключение при загрузке документа: {e}")
     return None
@@ -299,43 +314,32 @@ def find_actual_response(obj):
             if len(candidate) > len(longest): longest = candidate
     return longest
 
-def format_blocks(text):
-    if not text: return text
-    text = re.sub(r'^[A-Za-z0-9_/\+\-]{40,}={0,2}[^\n]*\n*', '', text)
-    text = re.sub(r'(?i)(<(?:think|thinking)>)[\s\n]*(?:<(?:think|thinking)>[\s\n]*)+', r'\1\n', text)
-    text = re.sub(r'(?i)(<think>|<thinking>)\s*', r'\1\n', text)
-    text = re.sub(r'(?i)\s*(</think>|</thinking>)\s*', r'\n\1\n\n', text)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    return text.strip()
-
 async def generate_text_core(request: Request, prompt, model_name="nano-banana-pro", file_content=None):
+    global CURRENT_MODEL_ID, CACHED_SNLM0E
+    
     print_sys("🚀 [ЭТАП 1] Подготовка данных...")
     doc_part = "null"
-    
     if file_content:
         doc_id = await upload_document_to_gemini(file_content, filename="chat.json")
         if doc_id: doc_part = f'[[[{json.dumps(doc_id)},16,null,"application/json"],"chat.json"]]'
         else: print_sys("⚠️ Предупреждение: Не удалось прикрепить историю (chat.json). Генерация продолжится без неё.")
 
-    print_sys("🔑 [ЭТАП 2] Получение токена авторизации (SNlM0e)...")
-    try:
-        resp = await GLOBAL_CLIENT.get("https://gemini.google.com/app", timeout=30.0)
-        match = re.search(r'"SNlM0e":"(.*?)"', resp.text) or re.search(r'\["SNlM0e","(.*?)"\]', resp.text)
-        if not match: 
-            print_sys("[❌] КРИТИЧЕСКАЯ ОШИБКА: Токен SNlM0e не найден. Куки протухли или Гугл требует капчу.")
-            return None
-        snlm0e = match.group(1)
-        print_sys("[+] Токен успешно получен.")
-    except Exception as e: 
-        print_sys(f"[❌] Ошибка соединения при получении токена: {e}")
+    print_sys("🔑 [ЭТАП 2] Проверка токена и настройка модели...")
+    snlm0e = await get_snlm0e()
+    if not snlm0e: 
         return None
 
     mode_id = "56fdd199312815e2" 
     if "thinking" in model_name.lower(): mode_id = "e051ce1aa80aa576"
     elif "pro" in model_name.lower(): mode_id = "e6fa609c3fa255c0"
         
-    await set_model_preference(snlm0e, mode_id)
-    await asyncio.sleep(1.0)
+    if CURRENT_MODEL_ID != mode_id:
+        success = await set_model_preference(snlm0e, mode_id)
+        if success:
+            CURRENT_MODEL_ID = mode_id
+            await asyncio.sleep(1.0)
+    else:
+        if IS_DEBUG: print_sys(f"[*] Модель уже настроена правильно, пропускаем лишний запрос.")
 
     stream_url = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?rt=c"
     candidate_id = uuid.uuid4().hex
@@ -351,7 +355,6 @@ async def generate_text_core(request: Request, prompt, model_name="nano-banana-p
 
     print_sys(f"📡 [ЭТАП 3] Отправка запроса в Google (Модель: {model_name})...")
     
-    # Запускаем анимацию загрузки
     spinner = asyncio.create_task(spinner_task("Гугл думает над ответом..."))
     
     try:
@@ -361,6 +364,9 @@ async def generate_text_core(request: Request, prompt, model_name="nano-banana-p
             if resp.status_code != 200:
                 spinner.cancel()
                 print_sys(f"[❌] ОШИБКА GOOGLE API: Сервер вернул статус HTTP {resp.status_code}")
+                if resp.status_code in [400, 401, 403]:
+                    CACHED_SNLM0E = None
+                    print_sys("[*] Кэш токена сброшен. При следующем запросе он будет обновлен.")
                 return None
                 
             async for line in resp.aiter_lines():
@@ -470,7 +476,8 @@ async def download_blob_via_batchexecute(snlm0e, blob, chat_id, r_id, rc_id, pro
     return None
 
 async def generate_image_core(request: Request, prompt, reference_images_b64=None, model_name="nano-banana-pro"):
-    print_sys(f"\n[*] Старт генерации картинки...")
+    global CURRENT_MODEL_ID, CACHED_SNLM0E
+    
     image_part = "null"
     if reference_images_b64:
         ref_data_list = []
@@ -486,12 +493,8 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
                 images_json_list.append(f'[[{json.dumps(ref_id)},1,null,{json.dumps(mime_type)}],"reference_{i}.{ext}"]')
             image_part = "[" + ",".join(images_json_list) + "]"
 
-    try:
-        resp = await GLOBAL_CLIENT.get("https://gemini.google.com/app", timeout=30.0)
-        match = re.search(r'"SNlM0e":"(.*?)"', resp.text) or re.search(r'\["SNlM0e","(.*?)"\]', resp.text)
-        if not match: return None
-        snlm0e = match.group(1)
-    except Exception: return None
+    snlm0e = await get_snlm0e()
+    if not snlm0e: return None
 
     stream_url = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?rt=c"
     device_id = str(uuid.uuid4()).upper()
@@ -515,18 +518,37 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
     
     raw_1 = ""
     
-    # Запускаем анимацию загрузки для картинки
+    # ЭТАП 1
     spinner = asyncio.create_task(spinner_task("Рисуем картинку (Этап 1)..."))
     try:
         async with GLOBAL_CLIENT.stream("POST", stream_url, data=req_data, headers=req_headers, timeout=150.0) as resp:
+            if resp.status_code != 200:
+                spinner.cancel()
+                print_sys(f"[❌] ОШИБКА GOOGLE API (Картинка, Этап 1): HTTP {resp.status_code}")
+                if resp.status_code in [400, 401, 403]:
+                    CACHED_SNLM0E = None
+                return None
+                
             async for line in resp.aiter_lines():
-                if request and await request.is_disconnected(): return None
+                if request and await request.is_disconnected(): 
+                    spinner.cancel()
+                    print_sys("🛑 [ПРЕРВАНО] Клиент отменил генерацию картинки.")
+                    return None
                 if line: raw_1 += line + "\n"
-    except Exception: pass
+    except httpx.ReadTimeout:
+        spinner.cancel()
+        print_sys("[❌] ОШИБКА: Тайм-аут при генерации картинки (Этап 1).")
+        return None
+    except Exception as e:
+        spinner.cancel()
+        print_sys(f"[❌] Ошибка соединения при генерации картинки (Этап 1): {e}")
+        return None
     finally:
         if not spinner.done(): spinner.cancel()
         
-    if not raw_1: return None
+    if not raw_1: 
+        print_sys("[❌] Ошибка: Гугл вернул пустой ответ при генерации (Этап 1).")
+        return None
     
     urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', raw_1)
     blobs = re.findall(r'"(\$[A-Za-z0-9+/\-=_]{50,})"', raw_1)
@@ -557,14 +579,31 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
             spinner_2 = asyncio.create_task(spinner_task("Улучшаем качество (Этап 2)..."))
             try:
                 async with GLOBAL_CLIENT.stream("POST", stream_url, data=req_2, headers=req_headers, timeout=150.0) as resp:
+                    if resp.status_code != 200:
+                        spinner_2.cancel()
+                        print_sys(f"[❌] ОШИБКА GOOGLE API (Картинка, Этап 2): HTTP {resp.status_code}")
+                        return None
+                        
                     async for line in resp.aiter_lines():
-                        if request and await request.is_disconnected(): return None
+                        if request and await request.is_disconnected(): 
+                            spinner_2.cancel()
+                            print_sys("🛑 [ПРЕРВАНО] Клиент отменил генерацию картинки (Этап 2).")
+                            return None
                         if line: raw_target += line + "\n"
-            except Exception: pass
+            except httpx.ReadTimeout:
+                spinner_2.cancel()
+                print_sys("[❌] ОШИБКА: Тайм-аут при генерации картинки (Этап 2).")
+                return None
+            except Exception as e:
+                spinner_2.cancel()
+                print_sys(f"[❌] Ошибка соединения при генерации картинки (Этап 2): {e}")
+                return None
             finally:
                 if not spinner_2.done(): spinner_2.cancel()
                 
-            if not raw_target: return None
+            if not raw_target: 
+                print_sys("[❌] Ошибка: Гугл вернул пустой ответ при генерации (Этап 2).")
+                return None
             
             urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', raw_target)
             blobs = re.findall(r'"(\$[A-Za-z0-9+/\-=_]{50,})"', raw_target)
@@ -579,7 +618,12 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
                 filepath = os.path.join(OUTPUT_DIR, f"{uuid.uuid4().hex}.png")
                 with open(filepath, 'wb') as f: f.write(img_r.content)
                 return filepath
-        except Exception: pass
+        except Exception as e: 
+            print_sys(f"[❌] Ошибка скачивания финальной картинки: {e}")
+            pass
+    else:
+        print_sys("[❌] ИТОГ: Не удалось найти ссылку на картинку в ответе Гугла.")
+        
     return None
 
 @app.get('/v1/models')
@@ -610,6 +654,8 @@ async def list_models(request: Request):
 @app.options('/v1beta/models/{model}:generateContent')
 async def unified_image_generation(request: Request, model: str = None):
     if request.method == 'OPTIONS': return JSONResponse({})
+    
+    print_sys(f"\n{'='*50}\n🎨 НОВЫЙ ЗАПРОС НА КАРТИНКУ\n{'='*50}")
     
     try: data = await request.json()
     except Exception: data = {}
@@ -663,10 +709,15 @@ async def unified_image_generation(request: Request, model: str = None):
 
     image_path = await generate_image_core(request, prompt, reference_images_b64=reference_images_b64, model_name=requested_model)
     
-    if not image_path: return JSONResponse({"error": "Failed"}, status_code=500)
+    if not image_path: 
+        print_sys("[❌] ИТОГ: Генерация картинки завершилась сбоем. Отправляем 500 ошибку.")
+        return JSONResponse({"error": "Failed"}, status_code=500)
+        
     with open(image_path, "rb") as f: b64_data = base64.b64encode(f.read()).decode('utf-8')
 
     created_timestamp = int(time.time())
+    
+    print_sys(f"✅ Картинка успешно отправлена в клиент!\n{'='*50}")
     
     if is_gemini_format:
         return JSONResponse({"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "image/png", "data": b64_data}}]}}]})
