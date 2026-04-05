@@ -1,11 +1,23 @@
 from playwright.sync_api import sync_playwright
 import time
 import os
+import sys
 
 def login_and_save_state():
     print("\n[*] Инициализация браузера для входа...")
     
     profile_dir = os.path.join(os.getcwd(), "chrome_profile")
+    
+    # Ищем прокси в аргументах запуска
+    proxy_config = None
+    if "--proxy" in sys.argv:
+        try:
+            idx = sys.argv.index("--proxy")
+            proxy_url = sys.argv[idx + 1]
+            proxy_config = {"server": proxy_url}
+            print(f"[*] Playwright использует прокси: {proxy_url}")
+        except IndexError:
+            pass
 
     with sync_playwright() as p:
         try:
@@ -14,6 +26,7 @@ def login_and_save_state():
                 user_data_dir=profile_dir,
                 channel="chrome", 
                 headless=False,
+                proxy=proxy_config,
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--disable-infobars"
@@ -25,6 +38,7 @@ def login_and_save_state():
                 user_data_dir=profile_dir,
                 channel="msedge", 
                 headless=False,
+                proxy=proxy_config,
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--disable-infobars"

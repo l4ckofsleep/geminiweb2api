@@ -3,3 +3,4 @@ generated_images/
 __pycache__/
 .env
 chrome_profile/
+logs.txt

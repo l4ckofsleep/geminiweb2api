@@ -8,7 +8,6 @@ STATE_FILE = "google_state.json"
 PROFILE_DIR = "chrome_profile"
 
 def is_mobile():
-    # Проверяем наличие специфичных для Android и Termux переменных окружения
     if 'com.termux' in os.environ.get('PREFIX', ''): return True
     if 'ANDROID_STORAGE' in os.environ: return True
     if hasattr(sys, 'getandroidapilevel'): return True
@@ -37,7 +36,6 @@ def run_auth_mobile():
         print("[!] Ошибка: нужны оба токена. Внимательно прочитай инструкцию выше и запусти скрипт заново.")
         sys.exit(1)
 
-    # Сохраняем в таком же формате, как это делает Playwright на ПК
     state = {
         "cookies": [
             {"name": "__Secure-1PSID", "value": psid, "domain": ".google.com"},
@@ -50,28 +48,56 @@ def run_auth_mobile():
 
     print("\n[+] УСПЕХ! Токены сохранены в файл.")
 
-def run_auth_pc():
+def run_auth_pc(proxy_url=None):
     print("\n" + "="*50)
     print("💻 ОБНАРУЖЕН ПК (Windows/Mac/Linux)")
     print("="*50)
     print("[*] Запуск автоматической авторизации через Playwright...")
-    subprocess.run([sys.executable, "auth.py"])
+    args = [sys.executable, "auth.py"]
+    if proxy_url:
+        args.extend(["--proxy", proxy_url])
+    subprocess.run(args)
 
-def run_api():
+def run_api(extra_args):
     print("\n[*] Запуск главного сервера API...")
-    args = [sys.executable, "api.py"]
-    
-    # Прокидываем флаг --temp, если он был при запуске
-    if "--temp" in sys.argv:
-        print("[*] Активирован режим ВРЕМЕННОГО ЧАТА (--temp)")
-        args.append("--temp")
-        
+    args = [sys.executable, "api.py"] + extra_args
     subprocess.run(args)
 
 def main():
     print("=" * 40)
     print("🍌 Nano Banana API Launcher")
     print("=" * 40)
+
+    extra_api_args = []
+    proxy_url = None
+
+    if "--temp" in sys.argv:
+        print("[*] Активирован режим ВРЕМЕННОГО ЧАТА (--temp)")
+        extra_api_args.append("--temp")
+
+    if "--debug" in sys.argv:
+        print("[*] Активирован режим ОТЛАДКИ (--debug).")
+        extra_api_args.append("--debug")
+
+    if "--proxy" in sys.argv:
+        try:
+            idx = sys.argv.index("--proxy")
+            proxy_url = sys.argv[idx + 1]
+            print(f"[*] Активирован ПРОКСИ: {proxy_url}")
+            extra_api_args.extend(["--proxy", proxy_url])
+        except IndexError:
+            print("[!] Ошибка: Укажи адрес после флага --proxy")
+            sys.exit(1)
+            
+    if "--port" in sys.argv:
+        try:
+            idx = sys.argv.index("--port")
+            port_val = sys.argv[idx + 1]
+            print(f"[*] Выбран нестандартный ПОРТ: {port_val}")
+            extra_api_args.extend(["--port", port_val])
+        except IndexError:
+            print("[!] Ошибка: Укажи порт после флага --port")
+            sys.exit(1)
 
     if "--reauth" in sys.argv:
         print("\n[!] Запрошена ЖЕСТКАЯ переавторизация (--reauth).")
@@ -92,10 +118,10 @@ def main():
         if is_mobile():
             run_auth_mobile()
         else:
-            run_auth_pc()
+            run_auth_pc(proxy_url)
 
     if os.path.exists(STATE_FILE):
-        run_api()
+        run_api(extra_api_args)
     else:
         print("\n[!] Ошибка: Авторизация не была завершена.")
         print("[!] Файл google_state.json не создан. Сервер не может быть запущен.")

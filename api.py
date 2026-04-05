@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from contextlib import asynccontextmanager
 import httpx
 import json
@@ -13,11 +14,28 @@ import hashlib
 import asyncio
 import sys
 
-# Проверяем наличие флага --temp
+# Парсинг аргументов
 IS_TEMP_CHAT = "--temp" in sys.argv
+IS_DEBUG = "--debug" in sys.argv
+
+PROXY_URL = None
+if "--proxy" in sys.argv:
+    try:
+        PROXY_URL = sys.argv[sys.argv.index("--proxy") + 1]
+    except IndexError:
+        pass
+
+PORT = 1717
+if "--port" in sys.argv:
+    try:
+        PORT = int(sys.argv[sys.argv.index("--port") + 1])
+    except (IndexError, ValueError):
+        pass
 
 OUTPUT_DIR = "generated_images"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+LOG_FILE = "logs.txt"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -25,12 +43,48 @@ HEADERS = {
     "x-same-domain": "1" 
 }
 
-GLOBAL_CLIENT = httpx.AsyncClient(headers=HEADERS, timeout=150.0, follow_redirects=True)
+client_kwargs = {
+    "headers": HEADERS,
+    "timeout": 150.0,
+    "follow_redirects": True
+}
+if PROXY_URL:
+    client_kwargs["proxy"] = PROXY_URL
+    client_kwargs["verify"] = False # Отключаем паранойю на случай кривых прокси
+
+GLOBAL_CLIENT = httpx.AsyncClient(**client_kwargs)
 
 def print_sys(msg):
-    """Кастомный принт для системных сообщений с таймстемпом"""
+    """Кастомный принт: пишет в консоль (затирая крутилку) и сохраняет в logs.txt"""
     t = time.strftime("%H:%M:%S")
-    print(f"[{t}] {msg}")
+    formatted_msg = f"[{t}] {msg}"
+    
+    # \r возвращает каретку в начало, \033[K стирает строку до конца, чтобы не было артефактов от крутилки
+    sys.stdout.write(f"\r\033[K{formatted_msg}\n")
+    sys.stdout.flush()
+    
+    # Пишем в лог-файл
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(formatted_msg + "\n")
+    except Exception:
+        pass
+
+async def spinner_task(message="Ожидание ответа..."):
+    """Асинхронная крутилка, которая работает в фоне"""
+    chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+    i = 0
+    try:
+        while True:
+            # Рисуем крутилку (без перехода на новую строку)
+            sys.stdout.write(f'\r\033[K[*] {chars[i]} {message}')
+            sys.stdout.flush()
+            i = (i + 1) % len(chars)
+            await asyncio.sleep(0.1)
+    except asyncio.CancelledError:
+        # При отмене задачи стираем крутилку с экрана
+        sys.stdout.write('\r\033[K')
+        sys.stdout.flush()
 
 async def init_session():
     print_sys("[*] Загрузка сессии из google_state.json...")
@@ -61,8 +115,23 @@ async def init_session():
             hash_str = f"{timestamp} {sapisid} https://gemini.google.com"
             sha1 = hashlib.sha1(hash_str.encode()).hexdigest()
             GLOBAL_CLIENT.headers.update({"Authorization": f"SAPISIDHASH {timestamp}_{sha1}"})
-            print_sys("[+] Сессия успешно загружена из файла!")
-            return True
+            print_sys("[+] Сессия загружена из файла. Проверяем валидность куков...")
+            
+            # --- Стартовая проверка валидности сессии ---
+            try:
+                resp = await GLOBAL_CLIENT.get("https://gemini.google.com/app", timeout=30.0)
+                if resp.status_code == 200 and ('"SNlM0e":"' in resp.text or '["SNlM0e","' in resp.text):
+                    print_sys("[+] Отлично! Сессия валидна, доступ к Gemini разрешен.")
+                    return True
+                else:
+                    print_sys(f"[❌] ВНИМАНИЕ: Гугл отверг куки (Код: {resp.status_code}). Сессия протухла или нужен другой IP/VPN.")
+                    print_sys("    ℹ️ Рекомендуется перезапустить скрипт с флагом --reauth (Termux) или --refresh (ПК).")
+                    return False
+            except Exception as e:
+                print_sys(f"[⚠️] Не удалось проверить сессию при старте (ошибка сети): {e}")
+                return True # Позволяем запуститься, возможно сеть просто "мигнула"
+            # --------------------------------------------
+            
         else:
             print_sys("[!] Внимание: В файле сессии не найдены нужные куки. Возможно, сессия устарела.")
             return False
@@ -98,6 +167,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# --- Глобальный обработчик неизвестных маршрутов (404) ---
+@app.exception_handler(StarletteHTTPException)
+async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    if exc.status_code == 404:
+        print_sys(f"\n[⚠️] ПРЕДУПРЕЖДЕНИЕ: Неизвестный запрос! Кто-то стучится на {request.method} {request.url.path}")
+    return JSONResponse({"error": "Not found"}, status_code=exc.status_code)
+# ---------------------------------------------------------
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -107,7 +184,7 @@ app.add_middleware(
 )
 
 async def set_model_preference(snlm0e, mode_id):
-    print_sys(f"[*] Отправка сигнала переключения модели (Mode ID: {mode_id})...")
+    if IS_DEBUG: print_sys(f"[DEBUG] Отправка сигнала переключения модели (Mode ID: {mode_id})...")
     url = "https://gemini.google.com/_/BardChatUi/data/batchexecute?rpcids=L5adhe&rt=c"
     
     null_array = [None] * 99
@@ -124,14 +201,14 @@ async def set_model_preference(snlm0e, mode_id):
         resp = await GLOBAL_CLIENT.post(url, data=req_data, timeout=15.0)
         if resp.status_code == 200:
             if "er" in resp.text and "generic" not in resp.text:
-                print_sys("[-] Сервер вернул 200, но внутри скрытая ошибка! Переключение могло не сработать.")
+                if IS_DEBUG: print_sys("[-] Сервер вернул 200, но внутри скрытая ошибка! Переключение могло не сработать.")
                 return False
-            print_sys("[+] Модель на сервере (UI) успешно изменена!")
+            if IS_DEBUG: print_sys("[+] Модель на сервере (UI) успешно изменена!")
             return True
         else:
             print_sys(f"[❌] Ошибка смены модели: HTTP {resp.status_code}")
     except Exception as e:
-        print_sys(f"[❌] Исключение при переключении модели: {e}")
+        if IS_DEBUG: print_sys(f"[❌] Исключение при переключении модели: {e}")
     return False
 
 async def upload_document_to_gemini(text_content, filename="chat.json"):
@@ -234,6 +311,7 @@ def format_blocks(text):
 async def generate_text_core(request: Request, prompt, model_name="nano-banana-pro", file_content=None):
     print_sys("🚀 [ЭТАП 1] Подготовка данных...")
     doc_part = "null"
+    
     if file_content:
         doc_id = await upload_document_to_gemini(file_content, filename="chat.json")
         if doc_id: doc_part = f'[[[{json.dumps(doc_id)},16,null,"application/json"],"chat.json"]]'
@@ -271,17 +349,23 @@ async def generate_text_core(request: Request, prompt, model_name="nano-banana-p
     req_headers = GLOBAL_CLIENT.headers.copy()
     req_headers["x-goog-ext-525001261-jspb"] = f'[1,null,null,null,"{mode_id}",null,null,null,null,null,null,2]'
 
-    print_sys(f"📡 [ЭТАП 3] Отправка запроса в Google (Модель: {model_name}). Ожидание ответа...")
+    print_sys(f"📡 [ЭТАП 3] Отправка запроса в Google (Модель: {model_name})...")
+    
+    # Запускаем анимацию загрузки
+    spinner = asyncio.create_task(spinner_task("Гугл думает над ответом..."))
+    
     try:
         full_text = ""
         async with GLOBAL_CLIENT.stream("POST", stream_url, data=req_data, headers=req_headers, timeout=150.0) as resp:
             
             if resp.status_code != 200:
+                spinner.cancel()
                 print_sys(f"[❌] ОШИБКА GOOGLE API: Сервер вернул статус HTTP {resp.status_code}")
                 return None
                 
             async for line in resp.aiter_lines():
                 if await request.is_disconnected():
+                    spinner.cancel()
                     print_sys("🛑 [ПРЕРВАНО] Клиент (Таверна) отменил запрос (нажата кнопка Stop). Разрываем соединение.")
                     return None
                     
@@ -295,12 +379,14 @@ async def generate_text_core(request: Request, prompt, model_name="nano-banana-p
                                 if len(item) > 2 and item[0] == "wrb.fr":
                                     inner_json_str = item[2]
                                     if inner_json_str:
+                                        if IS_DEBUG: print_sys(f"[DEBUG] Raw JSON: {inner_json_str[:150]}...")
                                         inner_data = json.loads(inner_json_str)
                                         extracted = find_actual_response(inner_data)
                                         if len(extracted) > len(full_text):
                                             full_text = extracted
                     except Exception: continue
         
+        spinner.cancel()
         print_sys("✅ [ЭТАП 4] Поток завершен. Анализ результата...")
         
         if not full_text:
@@ -314,11 +400,16 @@ async def generate_text_core(request: Request, prompt, model_name="nano-banana-p
         return clean_text.strip()
         
     except httpx.ReadTimeout:
+        spinner.cancel()
         print_sys("[❌] ОШИБКА: Тайм-аут. Гугл думал слишком долго (более 150 сек).")
         return None
     except Exception as e:
+        spinner.cancel()
         print_sys(f"[❌] КРИТИЧЕСКАЯ ОШИБКА при чтении потока: {e}")
         return None
+    finally:
+        if not spinner.done():
+            spinner.cancel()
 
 async def upload_image_to_gemini(image_bytes):
     mime_type = "image/jpeg"
@@ -423,12 +514,18 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
     req_data = {"f.req": json.dumps([None, payload_1_str], separators=(',', ':')), "at": snlm0e}
     
     raw_1 = ""
+    
+    # Запускаем анимацию загрузки для картинки
+    spinner = asyncio.create_task(spinner_task("Рисуем картинку (Этап 1)..."))
     try:
         async with GLOBAL_CLIENT.stream("POST", stream_url, data=req_data, headers=req_headers, timeout=150.0) as resp:
             async for line in resp.aiter_lines():
                 if request and await request.is_disconnected(): return None
                 if line: raw_1 += line + "\n"
     except Exception: pass
+    finally:
+        if not spinner.done(): spinner.cancel()
+        
     if not raw_1: return None
     
     urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', raw_1)
@@ -457,12 +554,16 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
             req_2 = {"f.req": json.dumps([None, payload_2_str], separators=(',', ':')), "at": snlm0e}
             
             raw_target = ""
+            spinner_2 = asyncio.create_task(spinner_task("Улучшаем качество (Этап 2)..."))
             try:
                 async with GLOBAL_CLIENT.stream("POST", stream_url, data=req_2, headers=req_headers, timeout=150.0) as resp:
                     async for line in resp.aiter_lines():
                         if request and await request.is_disconnected(): return None
                         if line: raw_target += line + "\n"
             except Exception: pass
+            finally:
+                if not spinner_2.done(): spinner_2.cancel()
+                
             if not raw_target: return None
             
             urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', raw_target)
@@ -487,6 +588,8 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
 @app.options('/v1beta/models')
 async def list_models(request: Request):
     if request.method == 'OPTIONS': return JSONResponse({})
+    
+    print_sys(f"\n{'='*50}\n🔍 ЗАПРОС СПИСКА МОДЕЛЕЙ\n{'='*50}")
     models = [
         {"id": "nano-banana-pro", "object": "model", "created": 1712050000, "owned_by": "google"},
         {"id": "nano-banana-2", "object": "model", "created": 1712050000, "owned_by": "google"},
@@ -494,6 +597,11 @@ async def list_models(request: Request):
         {"id": "gemini-3.0-flash-thinking-preview", "object": "model", "created": 1712050000, "owned_by": "google"},
         {"id": "gemini-3.1-pro-preview", "object": "model", "created": 1712050000, "owned_by": "google"}
     ]
+    
+    for m in models:
+        print_sys(f"  - {m['id']}")
+    print_sys("[+] Список моделей успешно отправлен в клиент.")
+    
     return JSONResponse({"object": "list", "data": models, "models": models})
 
 @app.post('/v1/images/generations')
@@ -632,21 +740,18 @@ async def chat_completions(request: Request):
     close_tag = f"</{tag_name}>"
 
     # 4. Унифицируем теги в сгенерированном ответе
-    generated_text = re.sub(r'(?i)<think>|<thinking>', open_tag, generated_text)
-    generated_text = re.sub(r'(?i)</think>|</thinking>', close_tag, generated_text)
+    generated_text = re.sub(rf'(?i)<think>|<thinking>', open_tag, generated_text)
+    generated_text = re.sub(rf'(?i)</think>|</thinking>', close_tag, generated_text)
     
     # 5. Вычитаем "эхо" (если Гугл полностью повторил префилл Таверны)
     final_text = generated_text
     if prefill_text:
-        # Для корректного сравнения временно приведем префилл к тому же тегу
-        norm_prefill = re.sub(r'(?i)<think>|<thinking>', open_tag, prefill_text)
+        norm_prefill = re.sub(rf'(?i)<think>|<thinking>', open_tag, prefill_text)
         
-        # Удаляем все пробелы для железобетонного сравнения строк
         norm_gen_nospace = re.sub(r'\s', '', final_text)
         norm_pre_nospace = re.sub(r'\s', '', norm_prefill)
         
         if norm_gen_nospace.startswith(norm_pre_nospace):
-            # Гугл вернул префилл целиком! Отрезаем его из ответа.
             pre_chars_count = len(norm_pre_nospace)
             chars_seen = 0
             split_idx = 0
@@ -659,8 +764,6 @@ async def chat_completions(request: Request):
             if split_idx > 0:
                 final_text = final_text[split_idx:].lstrip(' \t')
         else:
-            # Если Гугл не вернул весь префилл, но по привычке начал свой ответ 
-            # с открывающего тега (а Таверна уже послала его в префилле) — убиваем этот лишний тег.
             if re.search(rf'(?i){open_tag}', norm_prefill) and final_text.lstrip().lower().startswith(open_tag.lower()):
                 final_text = re.sub(rf'(?i)^\s*{open_tag}\s*', '\n', final_text)
 
@@ -726,5 +829,5 @@ async def chat_completions(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    print_sys("\n[*] Запуск FastAPI сервера (Порт: 1717)")
-    uvicorn.run("api:app", host="0.0.0.0", port=1717, log_level="warning")
+    print_sys(f"\n[*] Geminiweb2API запущен! (Порт: {PORT})")
+    uvicorn.run("api:app", host="0.0.0.0", port=PORT, log_level="warning")
