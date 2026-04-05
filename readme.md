@@ -52,7 +52,7 @@ API автоматически отправляет скрытые систем�
 
  Установите зависимости:
 
-    pip install fastapi uvicorn httpx playwright httpx[socks]
+    pip install fastapi uvicorn httpx playwright "httpx[socks]"
     playwright install chromium
 
    Запустите умный лаунчер:
@@ -93,7 +93,7 @@ API автоматически отправляет скрытые систем�
 	
    Потом устанавливаем зависимости через pip:
    
-    pip install fastapi uvicorn httpx httpx[socks]
+    pip install fastapi uvicorn httpx "httpx[socks]"
 	
    (после последней команды установка будет долгой, главное не закрывать termux.)
 
