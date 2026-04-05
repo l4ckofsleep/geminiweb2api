@@ -208,20 +208,21 @@ def find_actual_response(obj):
     return longest
 
 def format_blocks(text):
-    """Жесткое форматирование, как ты просил."""
+    """Идеальное форматирование, поддерживающее и <think>, и <thinking>"""
     if not text: return text
     
-    # 1. Срезаем внутренний мусор Гугла
+    # 1. Срезаем внутренний мусор Гугла (длинные хэши базы64)
     text = re.sub(r'^[A-Za-z0-9_/\+\-]{40,}={0,2}[^\n]*\n*', '', text)
     
-    # 2. Нормализуем теги
-    text = text.replace('<thinking>', '<think>').replace('</thinking>', '</think>')
+    # 2. Схлопываем дубли (например, если Таверна послала <thinking>, а Гугл следом выдал <think>)
+    # Эта регулярка найдет подряд идущие теги и оставит только самый первый
+    text = re.sub(r'(?i)(<(?:think|thinking)>)[\s\n]*(?:<(?:think|thinking)>[\s\n]*)+', r'\1\n', text)
     
-    # 3. ЖЕСТКО ставим перенос строки после <think>
-    text = re.sub(r'(?i)<think>\s*', '<think>\n', text)
+    # 3. ЖЕСТКО ставим перенос строки после открывающих тегов
+    text = re.sub(r'(?i)(<think>|<thinking>)\s*', r'\1\n', text)
     
-    # 4. ЖЕСТКО ставим перенос строки до и после </think>
-    text = re.sub(r'(?i)\s*</think>\s*', '\n</think>\n\n', text)
+    # 4. ЖЕСТКО ставим перенос строки до и после закрывающих тегов
+    text = re.sub(r'(?i)\s*(</think>|</thinking>)\s*', r'\n\1\n\n', text)
     
     # 5. Убираем лишние пустоты
     text = re.sub(r'\n{3,}', '\n\n', text)
@@ -587,41 +588,27 @@ async def chat_completions(request: Request):
     if generated_text is None:
         return JSONResponse({"error": {"message": "Request cancelled by user or failed", "type": "server_error"}}, status_code=500)
 
-    # 2. Очищаем текст от эха префилла Гугла (если он его вернул)
-    if prefill_text and generated_text.startswith(prefill_text):
-        generated_text = generated_text[len(prefill_text):]
-
-    # 3. Склеиваем префилл и ответ для глобального форматирования
+    # 2. Склеиваем префилл и ответ ДО форматирования
     full_message = prefill_text + "\n" + generated_text if prefill_text else generated_text
-    
-    # 4. Идеально форматируем всю строку целиком
+
+    # 3. Идеально форматируем всю строку целиком (схлопываем дубли, если они появились на стыке)
     full_message = format_blocks(full_message)
 
-    # 5. Вычитаем из отформатированного текста наш префилл "в лоб"
+    # 4. Вычитаем из отформатированного текста наш префилл "в лоб"
     if prefill_text:
-        # Считаем количество непустых символов в префилле Таверны
-        prefill_len_non_ws = len(re.sub(r'\s', '', prefill_text))
-        chars_chopped = 0
-        split_idx = 0
-        
-        # Находим точку разреза
-        for i, char in enumerate(full_message):
-            if not char.isspace():
-                chars_chopped += 1
-            if chars_chopped == prefill_len_non_ws:
-                split_idx = i + 1
-                break
-        
-        # Отрезаем и сохраняем перенос строки
-        final_text = full_message[split_idx:].lstrip(' \t')
-        
-        # Если префилл был тегом (например <think>), гарантируем перенос строки
-        if prefill_text.endswith('>') and not final_text.startswith('\n'):
-            final_text = '\n' + final_text
+        formatted_prefill = format_blocks(prefill_text)
+        if full_message.startswith(formatted_prefill):
+            final_text = full_message[len(formatted_prefill):]
+        else:
+            final_text = full_message
+            
+        # Гарантируем красивый перенос, если префилл заканчивался тегом (например, <thinking>)
+        if prefill_text.strip().endswith('>') and not final_text.startswith('\n'):
+            final_text = '\n' + final_text.lstrip(' \t')
     else:
         final_text = full_message
 
-    # 6. Возврат (Фейковый стриминг сохраняется ради кнопки Stop)
+    # 5. Возврат (Фейковый стриминг сохраняется ради кнопки Stop)
     if is_stream:
         async def sse_stream():
             cmpl_id = f"chatcmpl-{uuid.uuid4().hex}"
