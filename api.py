@@ -280,7 +280,10 @@ async def upload_document_to_gemini(text_content, filename="chat.json"):
 def is_garbage_node(text):
     if not isinstance(text, str): return False
     if text.startswith('http') or text.startswith('c_') or text.startswith('r_') or text.startswith('rc_'): return True
-    if len(text) > 400 and " " not in text: return True
+    
+    # ИСПРАВЛЕНО: Теперь скрипт учитывает и обычный пробел, и брайлевский невидимый пробел (U+2800)
+    if len(text) > 400 and " " not in text and "⠀" not in text: return True
+    
     if re.match(r'^[A-Za-z0-9_/\+\-]{40,}={0,2}', text): return True
         
     garbage_prefixes = [
@@ -289,7 +292,7 @@ def is_garbage_node(text):
         "Verifying Formatting", "Assessing Tactical", "Composing the Scene",
         "Refining the Output", "Finalizing the Scene", "Expanding the Scene",
         "Evaluating the Narrative", "Assessing the Reaction", "Composing the Response",
-        "Refining the Russian"
+        "Refining the Russian", "Defining the Objective", "<think>\nDefining the Objective"
     ]
     for prefix in garbage_prefixes:
         if text.startswith(prefix): return True
