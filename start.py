@@ -65,7 +65,7 @@ def run_api(extra_args):
 
 def main():
     print("=" * 40)
-    print("🍌 Nano Banana API Launcher")
+    print("🍌 Geminiweb2api")
     print("=" * 40)
 
     extra_api_args = []
