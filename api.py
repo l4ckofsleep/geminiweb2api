@@ -64,7 +64,6 @@ def print_sys(msg):
     t = time.strftime("%H:%M:%S")
     formatted_msg = f"[{t}] {msg}"
     
-    # \r возвращает каретку в начало, \033[K стирает строку до конца
     sys.stdout.write(f"\r\033[K{formatted_msg}\n")
     sys.stdout.flush()
     
@@ -85,7 +84,8 @@ async def spinner_task(message="Ожидание ответа..."):
             i = (i + 1) % len(chars)
             await asyncio.sleep(0.1)
     except asyncio.CancelledError:
-        pass
+        sys.stdout.write('\r\033[K')
+        sys.stdout.flush()
 
 async def get_snlm0e(force_refresh=False):
     """Умное получение токена авторизации с кэшированием"""
@@ -96,26 +96,10 @@ async def get_snlm0e(force_refresh=False):
     if IS_DEBUG: print_sys("[DEBUG] Скачивание главной страницы для получения токена SNlM0e...")
     try:
         resp = await GLOBAL_CLIENT.get("https://gemini.google.com/app", timeout=30.0)
-        
-        if resp.status_code != 200:
-            print_sys(f"[❌] ОШИБКА СЕРВЕРА GOOGLE: Получен HTTP код {resp.status_code} при запросе страницы.")
-            
         match = re.search(r'"SNlM0e":"(.*?)"', resp.text) or re.search(r'\["SNlM0e","(.*?)"\]', resp.text)
         if not match: 
-            if resp.status_code == 200:
-                print_sys("[❌] КРИТИЧЕСКАЯ ОШИБКА: Токен SNlM0e не найден. Куки протухли или нужен VPN.")
-            
-            # --- СОХРАНЕНИЕ ДАМПА ПРИ ЛЮБОЙ ОШИБКЕ (502, 403, пустой ответ) ---
-            try:
-                with open("error_dump.html", "w", encoding="utf-8") as f:
-                    f.write(resp.text)
-                print_sys(f"[*] Полный ответ Гугла (код {resp.status_code}) сохранен в 'error_dump.html'!")
-            except Exception as dump_err:
-                print_sys(f"[!] Не удалось сохранить error_dump.html: {dump_err}")
-            # -------------------------------------------------------------------
-            
+            print_sys("[❌] КРИТИЧЕСКАЯ ОШИБКА: Токен SNlM0e не найден. Куки протухли или нужен VPN.")
             return None
-            
         CACHED_SNLM0E = match.group(1)
         if IS_DEBUG: print_sys("[DEBUG] Токен SNlM0e успешно обновлен и кэширован.")
         return CACHED_SNLM0E
@@ -162,7 +146,7 @@ async def init_session():
                 print_sys("[+] Отлично! Сессия валидна, доступ к Gemini разрешен.")
                 return True
             else:
-                print_sys("[❌] ВНИМАНИЕ: Гугл отверг куки (или сервер недоступен).")
+                print_sys("[❌] ВНИМАНИЕ: Гугл отверг куки. Рекомендуется перезапуск с флагом --reauth.")
                 return False
         else:
             print_sys("[!] Внимание: В файле сессии не найдены нужные куки. Возможно, сессия устарела.")
@@ -175,7 +159,6 @@ async def keep_alive_worker():
     """Умный фоновый воркер с плавающим интервалом (защита от анти-бота)"""
     while True:
         try:
-            # Рандомная пауза от 4 до 8 минут (240 - 480 секунд)
             sleep_time = random.randint(240, 480)
             await asyncio.sleep(sleep_time)
             
@@ -186,7 +169,7 @@ async def keep_alive_worker():
             if token:
                 if IS_DEBUG: print_sys("[DEBUG] Keep-alive: Сессия активна.")
             else:
-                print_sys("[!] Keep-alive: Ошибка при продлении сессии (Гугл отклонил куки или сервер упал).")
+                print_sys("[!] Keep-alive: Сессия убита Гуглом. Сделай --refresh.")
         except asyncio.CancelledError:
             break
         except Exception:
@@ -202,7 +185,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Обработчик неизвестных маршрутов (404)
 @app.exception_handler(StarletteHTTPException)
 async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
     if exc.status_code == 404:
@@ -239,8 +221,6 @@ async def set_model_preference(snlm0e, mode_id):
                 return False
             if IS_DEBUG: print_sys("[+] Модель на сервере (UI) успешно изменена!")
             return True
-        else:
-            print_sys(f"[❌] Ошибка при переключении модели: HTTP {resp.status_code}")
     except Exception as e:
         if IS_DEBUG: print_sys(f"[❌] Исключение при переключении модели: {e}")
     return False
@@ -293,8 +273,6 @@ async def upload_document_to_gemini(text_content, filename="chat.json"):
                 print_sys(f"[+] Файл истории успешно прикреплен (ID: {upload_id[:15]}...)")
                 return upload_id
             return resp_text.strip()
-        else:
-            print_sys(f"[❌] Ошибка загрузки документа (Финал): HTTP {res_upload.status_code}")
     except Exception as e:
         print_sys(f"[❌] Исключение при загрузке документа: {e}")
     return None
@@ -415,7 +393,6 @@ async def generate_text_core(request: Request, prompt, model_name="nano-banana-p
         
         if not full_text:
             print_sys("[❌] ОШИБКА: Гугл вернул абсолютно пустой текст!")
-            print_sys("    ℹ️ Возможные причины: Сработал жесткий NSFW-фильтр Гугла, либо структура промпта была отвергнута.")
             return None
             
         print_sys(f"[+] Сырой текст успешно извлечен (Длина: {len(full_text)} символов).")
@@ -434,10 +411,6 @@ async def generate_text_core(request: Request, prompt, model_name="nano-banana-p
     finally:
         if not spinner.done():
             spinner.cancel()
-
-# =====================================================================
-# НИЖЕ ИДЕТ ЛОГИКА ГЕНЕРАЦИИ КАРТИНОК ПОЛНОСТЬЮ ИЗ ФАЙЛА API_ПРИМЕР.PY
-# =====================================================================
 
 async def upload_image_to_gemini(image_bytes):
     mime_type = "image/jpeg"
@@ -539,7 +512,6 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
     
     raw_1 = ""
     
-    # Запускаем анимацию загрузки для картинки
     spinner = asyncio.create_task(spinner_task("Рисуем картинку (Этап 1)..."))
     try:
         async with GLOBAL_CLIENT.stream("POST", stream_url, data=req_data, headers=req_headers, timeout=150.0) as resp:
@@ -745,74 +717,92 @@ async def chat_completions(request: Request):
         prefill_text = messages[-1].get("content", "").strip()
         print_sys(f"[*] Обнаружен префилл от Таверны (Длина: {len(prefill_text)} символов).")
 
-    # 1. Запрашиваем голый сырой текст у Гугла
-    generated_text = await generate_text_core(request, safe_prompt, model_name=requested_model, file_content=file_content)
-
-    if generated_text is None:
-        print_sys("[❌] ИТОГ: Генерация прервана или завершилась сбоем. Отправляем ошибку в Таверну.")
-        return JSONResponse({"error": {"message": "Request cancelled by user or failed (Check console logs)", "type": "server_error"}}, status_code=500)
-
-    print_sys("✨ [ЭТАП 5] Умное форматирование тегов и вычитание префилла...")
-
-    # 2. Очищаем текст от мусора Гугла (хэши базы64 в начале)
-    generated_text = re.sub(r'^[A-Za-z0-9_/\+\-]{40,}={0,2}[^\n]*\n*', '', generated_text)
-
-    # 3. Определяем, какой тег предпочитает юзер (по умолчанию <think>)
-    tag_name = "think"
-    if prefill_text and "<thinking>" in prefill_text.lower():
-        tag_name = "thinking"
-    elif "<thinking>" in generated_text.lower():
-        tag_name = "thinking"
-        
-    open_tag = f"<{tag_name}>"
-    close_tag = f"</{tag_name}>"
-
-    # 4. Унифицируем теги в сгенерированном ответе
-    generated_text = re.sub(rf'(?i)<think>|<thinking>', open_tag, generated_text)
-    generated_text = re.sub(rf'(?i)</think>|</thinking>', close_tag, generated_text)
-    
-    # 5. Вычитаем "эхо" (если Гугл полностью повторил префилл Таверны)
-    final_text = generated_text
-    if prefill_text:
-        norm_prefill = re.sub(rf'(?i)<think>|<thinking>', open_tag, prefill_text)
-        
-        norm_gen_nospace = re.sub(r'\s', '', final_text)
-        norm_pre_nospace = re.sub(r'\s', '', norm_prefill)
-        
-        if norm_gen_nospace.startswith(norm_pre_nospace):
-            pre_chars_count = len(norm_pre_nospace)
-            chars_seen = 0
-            split_idx = 0
-            for i, char in enumerate(final_text):
-                if not char.isspace():
-                    chars_seen += 1
-                if chars_seen == pre_chars_count:
-                    split_idx = i + 1
-                    break
-            if split_idx > 0:
-                final_text = final_text[split_idx:].lstrip(' \t')
-        else:
-            if re.search(rf'(?i){open_tag}', norm_prefill) and final_text.lstrip().lower().startswith(open_tag.lower()):
-                final_text = re.sub(rf'(?i)^\s*{open_tag}\s*', '\n', final_text)
-
-    # 6. Жесткое форматирование переносов для закрывающего тега
-    final_text = re.sub(rf'(?i)\s*({close_tag})\s*', rf'\n\1\n\n', final_text)
-    final_text = re.sub(r'\n{3,}', '\n\n', final_text)
-    
-    # 7. Красивый стык: если префилл заканчивался тегом, гарантируем перенос перед текстом Гугла
-    if prefill_text and prefill_text.strip().endswith('>'):
-        if not final_text.startswith('\n'):
-            final_text = '\n' + final_text.lstrip(' \t')
-
-    final_text = final_text.rstrip()
-
-    print_sys(f"✅ [ЭТАП 6] Текст готов к отправке (Длина: {len(final_text)}). Маскируем под стриминг...")
-
-    # 8. Возврат
     if is_stream:
         async def sse_stream():
             cmpl_id = f"chatcmpl-{uuid.uuid4().hex}"
             created = int(time.time())
+            
+            # Запускаем генерацию Гугла в виде фоновой задачи
+            task = asyncio.create_task(generate_text_core(request, safe_prompt, model_name=requested_model, file_content=file_content))
+            
+            # Пока задача не завершена, каждые 10 секунд кидаем пустышку (пульс), чтобы браузер не убил сокет
+            while not task.done():
+                _, pending = await asyncio.wait([task], timeout=10.0)
+                if pending:
+                    ping_chunk = {
+                        "id": cmpl_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": requested_model,
+                        "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": None}]
+                    }
+                    yield f"data: {json.dumps(ping_chunk)}\n\n"
+            
+            # Получаем реальный результат
+            generated_text = task.result()
+
+            if generated_text is None:
+                err_chunk = {"id": cmpl_id, "object": "chat.completion.chunk", "created": created, "model": requested_model, "choices": [{"index": 0, "delta": {"content": "\n[❌ Ошибка генерации. Проверьте логи сервера]"}, "finish_reason": "stop"}]}
+                yield f"data: {json.dumps(err_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+                print_sys(f"🏁 ЗАВЕРШЕНО С ОШИБКОЙ.\n{'='*50}")
+                return
+
+            print_sys("✨ [ЭТАП 5] Умное форматирование тегов и вычитание префилла...")
+
+            # 2. Очищаем текст от мусора Гугла (хэши базы64 в начале)
+            generated_text = re.sub(r'^[A-Za-z0-9_/\+\-]{40,}={0,2}[^\n]*\n*', '', generated_text)
+
+            # 3. Определяем, какой тег предпочитает юзер (по умолчанию <think>)
+            tag_name = "think"
+            if prefill_text and "<thinking>" in prefill_text.lower():
+                tag_name = "thinking"
+            elif "<thinking>" in generated_text.lower():
+                tag_name = "thinking"
+                
+            open_tag = f"<{tag_name}>"
+            close_tag = f"</{tag_name}>"
+
+            # 4. Унифицируем теги в сгенерированном ответе
+            generated_text = re.sub(rf'(?i)<think>|<thinking>', open_tag, generated_text)
+            generated_text = re.sub(rf'(?i)</think>|</thinking>', close_tag, generated_text)
+            
+            # 5. Вычитаем "эхо" (если Гугл полностью повторил префилл Таверны)
+            final_text = generated_text
+            if prefill_text:
+                norm_prefill = re.sub(rf'(?i)<think>|<thinking>', open_tag, prefill_text)
+                
+                norm_gen_nospace = re.sub(r'\s', '', final_text)
+                norm_pre_nospace = re.sub(r'\s', '', norm_prefill)
+                
+                if norm_gen_nospace.startswith(norm_pre_nospace):
+                    pre_chars_count = len(norm_pre_nospace)
+                    chars_seen = 0
+                    split_idx = 0
+                    for i, char in enumerate(final_text):
+                        if not char.isspace():
+                            chars_seen += 1
+                        if chars_seen == pre_chars_count:
+                            split_idx = i + 1
+                            break
+                    if split_idx > 0:
+                        final_text = final_text[split_idx:].lstrip(' \t')
+                else:
+                    if re.search(rf'(?i){open_tag}', norm_prefill) and final_text.lstrip().lower().startswith(open_tag.lower()):
+                        final_text = re.sub(rf'(?i)^\s*{open_tag}\s*', '\n', final_text)
+
+            # 6. Жесткое форматирование переносов для закрывающего тега
+            final_text = re.sub(rf'(?i)\s*({close_tag})\s*', rf'\n\1\n\n', final_text)
+            final_text = re.sub(r'\n{3,}', '\n\n', final_text)
+            
+            # 7. Красивый стык: если префилл заканчивался тегом, гарантируем перенос перед текстом Гугла
+            if prefill_text and prefill_text.strip().endswith('>'):
+                if not final_text.startswith('\n'):
+                    final_text = '\n' + final_text.lstrip(' \t')
+
+            final_text = final_text.rstrip()
+
+            print_sys(f"✅ [ЭТАП 6] Текст готов к отправке (Длина: {len(final_text)}). Выдаем финальный результат...")
             
             response_chunk = {
                 "id": cmpl_id,
@@ -835,24 +825,60 @@ async def chat_completions(request: Request):
             print_sys(f"🏁 ЗАВЕРШЕНО. Сообщение доставлено в Таверну.\n{'='*50}")
             
         return StreamingResponse(sse_stream(), media_type='text/event-stream')
-        
+
     else:
+        # Резервный механизм, если стриминг выключен
+        generated_text = await generate_text_core(request, safe_prompt, model_name=requested_model, file_content=file_content)
+
+        if generated_text is None:
+            print_sys("[❌] ИТОГ: Генерация прервана или завершилась сбоем. Отправляем ошибку в Таверну.")
+            return JSONResponse({"error": {"message": "Request cancelled by user or failed (Check console logs)", "type": "server_error"}}, status_code=500)
+
+        print_sys("✨ [ЭТАП 5] Умное форматирование тегов и вычитание префилла...")
+
+        # (Дублируем блок форматирования для режима без стрима)
+        generated_text = re.sub(r'^[A-Za-z0-9_/\+\-]{40,}={0,2}[^\n]*\n*', '', generated_text)
+        tag_name = "think"
+        if prefill_text and "<thinking>" in prefill_text.lower(): tag_name = "thinking"
+        elif "<thinking>" in generated_text.lower(): tag_name = "thinking"
+        open_tag = f"<{tag_name}>"; close_tag = f"</{tag_name}>"
+        generated_text = re.sub(rf'(?i)<think>|<thinking>', open_tag, generated_text)
+        generated_text = re.sub(rf'(?i)</think>|</thinking>', close_tag, generated_text)
+        
+        final_text = generated_text
+        if prefill_text:
+            norm_prefill = re.sub(rf'(?i)<think>|<thinking>', open_tag, prefill_text)
+            norm_gen_nospace = re.sub(r'\s', '', final_text)
+            norm_pre_nospace = re.sub(r'\s', '', norm_prefill)
+            if norm_gen_nospace.startswith(norm_pre_nospace):
+                pre_chars_count = len(norm_pre_nospace)
+                chars_seen = 0
+                split_idx = 0
+                for i, char in enumerate(final_text):
+                    if not char.isspace(): chars_seen += 1
+                    if chars_seen == pre_chars_count:
+                        split_idx = i + 1
+                        break
+                if split_idx > 0: final_text = final_text[split_idx:].lstrip(' \t')
+            else:
+                if re.search(rf'(?i){open_tag}', norm_prefill) and final_text.lstrip().lower().startswith(open_tag.lower()):
+                    final_text = re.sub(rf'(?i)^\s*{open_tag}\s*', '\n', final_text)
+
+        final_text = re.sub(rf'(?i)\s*({close_tag})\s*', rf'\n\1\n\n', final_text)
+        final_text = re.sub(r'\n{3,}', '\n\n', final_text)
+        if prefill_text and prefill_text.strip().endswith('>'):
+            if not final_text.startswith('\n'): final_text = '\n' + final_text.lstrip(' \t')
+
+        final_text = final_text.rstrip()
+
+        print_sys(f"✅ [ЭТАП 6] Текст готов к отправке (Длина: {len(final_text)}).")
         print_sys(f"🏁 ЗАВЕРШЕНО. Сообщение доставлено в Таверну (Без стрима).\n{'='*50}")
         return JSONResponse({
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
             "created": int(time.time()),
             "model": requested_model,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": final_text
-                    },
-                    "finish_reason": "stop"
-                }
-            ]
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": final_text}, "finish_reason": "stop"}]
         })
 
 if __name__ == "__main__":
