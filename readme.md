@@ -48,12 +48,16 @@ API автоматически отправляет скрытые систем�
  Скачайте файлы проекта в пустую папку (Нажмите ПКМ -> Открыть в терминале в удобном месте):
 
     git clone https://github.com/l4ckofsleep/geminiweb2api.git
+	
+   Переходим в клонированную папку:
    
     cd geminiweb2api
 
  Установите зависимости:
 
     pip install fastapi uvicorn httpx playwright "httpx[socks]"
+	
+   И вот эти тоже:
    
     playwright install chromium
 
