@@ -85,8 +85,6 @@ async def spinner_task(message="Ожидание ответа..."):
             i = (i + 1) % len(chars)
             await asyncio.sleep(0.1)
     except asyncio.CancelledError:
-        # Убрали принудительное затирание здесь, чтобы не стереть логи ошибок!
-        # Функция print_sys сама затрет крутилку перед выводом текста.
         pass
 
 async def get_snlm0e(force_refresh=False):
@@ -98,10 +96,16 @@ async def get_snlm0e(force_refresh=False):
     if IS_DEBUG: print_sys("[DEBUG] Скачивание главной страницы для получения токена SNlM0e...")
     try:
         resp = await GLOBAL_CLIENT.get("https://gemini.google.com/app", timeout=30.0)
+        
+        if resp.status_code != 200:
+            print_sys(f"[❌] ОШИБКА СЕРВЕРА GOOGLE: Получен HTTP код {resp.status_code} при запросе страницы.")
+            
         match = re.search(r'"SNlM0e":"(.*?)"', resp.text) or re.search(r'\["SNlM0e","(.*?)"\]', resp.text)
         if not match: 
-            print_sys("[❌] КРИТИЧЕСКАЯ ОШИБКА: Токен SNlM0e не найден. Куки протухли или нужен VPN.")
+            if resp.status_code == 200:
+                print_sys("[❌] КРИТИЧЕСКАЯ ОШИБКА: Токен SNlM0e не найден. Куки протухли или нужен VPN.")
             return None
+            
         CACHED_SNLM0E = match.group(1)
         if IS_DEBUG: print_sys("[DEBUG] Токен SNlM0e успешно обновлен и кэширован.")
         return CACHED_SNLM0E
@@ -148,7 +152,7 @@ async def init_session():
                 print_sys("[+] Отлично! Сессия валидна, доступ к Gemini разрешен.")
                 return True
             else:
-                print_sys("[❌] ВНИМАНИЕ: Гугл отверг куки. Рекомендуется перезапуск с флагом --reauth.")
+                print_sys("[❌] ВНИМАНИЕ: Гугл отверг куки (или сервер недоступен).")
                 return False
         else:
             print_sys("[!] Внимание: В файле сессии не найдены нужные куки. Возможно, сессия устарела.")
@@ -172,7 +176,7 @@ async def keep_alive_worker():
             if token:
                 if IS_DEBUG: print_sys("[DEBUG] Keep-alive: Сессия активна.")
             else:
-                print_sys("[!] Keep-alive: Сессия убита Гуглом. Сделай --refresh.")
+                print_sys("[!] Keep-alive: Ошибка при продлении сессии (Гугл отклонил куки или сервер упал).")
         except asyncio.CancelledError:
             break
         except Exception:
@@ -225,6 +229,8 @@ async def set_model_preference(snlm0e, mode_id):
                 return False
             if IS_DEBUG: print_sys("[+] Модель на сервере (UI) успешно изменена!")
             return True
+        else:
+            print_sys(f"[❌] Ошибка при переключении модели: HTTP {resp.status_code}")
     except Exception as e:
         if IS_DEBUG: print_sys(f"[❌] Исключение при переключении модели: {e}")
     return False
@@ -277,6 +283,8 @@ async def upload_document_to_gemini(text_content, filename="chat.json"):
                 print_sys(f"[+] Файл истории успешно прикреплен (ID: {upload_id[:15]}...)")
                 return upload_id
             return resp_text.strip()
+        else:
+            print_sys(f"[❌] Ошибка загрузки документа (Финал): HTTP {res_upload.status_code}")
     except Exception as e:
         print_sys(f"[❌] Исключение при загрузке документа: {e}")
     return None
@@ -445,7 +453,10 @@ async def upload_image_to_gemini(image_bytes):
     }
     try:
         res = await GLOBAL_CLIENT.post(url, headers=headers_start, content=b"", timeout=15.0)
-        if res.status_code != 200: return None, None, None
+        if res.status_code != 200: 
+            print_sys(f"[❌] Ошибка загрузки картинки (Старт): HTTP {res.status_code}")
+            return None, None, None
+            
         upload_url = res.headers.get("X-Goog-Upload-URL")
         if not upload_url: return None, None, None
             
@@ -459,8 +470,13 @@ async def upload_image_to_gemini(image_bytes):
             "Content-Type": "application/octet-stream" 
         }
         res_upload = await GLOBAL_CLIENT.post(upload_url, headers=headers_upload, content=image_bytes, timeout=30.0)
-        if res_upload.status_code == 200: return res_upload.text.strip(), mime_type, ext
-    except Exception: pass
+        if res_upload.status_code == 200: 
+            return res_upload.text.strip(), mime_type, ext
+        else:
+            print_sys(f"[❌] Ошибка загрузки картинки (Финал): HTTP {res_upload.status_code}")
+    except Exception as e: 
+        print_sys(f"[❌] Исключение при загрузке картинки: {e}")
+        pass
     return None, None, None
 
 async def download_blob_via_batchexecute(snlm0e, blob, chat_id, r_id, rc_id, prompt):
@@ -517,6 +533,7 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
     req_data = {"f.req": json.dumps([None, payload_1_str], separators=(',', ':')), "at": snlm0e}
     
     raw_1 = ""
+    full_text_1 = ""
     
     # ЭТАП 1
     spinner = asyncio.create_task(spinner_task("Рисуем картинку (Этап 1)..."))
@@ -534,7 +551,23 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
                     spinner.cancel()
                     print_sys("🛑 [ПРЕРВАНО] Клиент отменил генерацию картинки.")
                     return None
-                if line: raw_1 += line + "\n"
+                if line: 
+                    raw_1 += line + "\n"
+                    # Пытаемся вытащить текст, чтобы проверить на цензуру
+                    try:
+                        clean_line = re.sub(r'^\d+\s*', '', line)
+                        if clean_line.startswith('['):
+                            parsed_data = json.loads(clean_line)
+                            if isinstance(parsed_data, list) and len(parsed_data) > 0 and isinstance(parsed_data[0], list):
+                                item = parsed_data[0]
+                                if len(item) > 2 and item[0] == "wrb.fr":
+                                    inner_json_str = item[2]
+                                    if inner_json_str:
+                                        inner_data = json.loads(inner_json_str)
+                                        extracted = find_actual_response(inner_data)
+                                        if len(extracted) > len(full_text_1):
+                                            full_text_1 = extracted
+                    except Exception: pass
     except httpx.ReadTimeout:
         spinner.cancel()
         print_sys("[❌] ОШИБКА: Тайм-аут при генерации картинки (Этап 1).")
@@ -549,9 +582,25 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
     if not raw_1: 
         print_sys("[❌] Ошибка: Гугл вернул пустой ответ при генерации (Этап 1).")
         return None
+        
+    is_refusal_1 = False
+    if full_text_1:
+        text_lower = full_text_1.lower()
+        refusal_phrases = ["не могу", "i cannot", "i can't", "sorry", "извините", "guidelines", "policy", "violate", "unable to", "unfortunately"]
+        if any(phrase in text_lower for phrase in refusal_phrases):
+            is_refusal_1 = True
+            print_sys(f"[!] ВНИМАНИЕ: Гугл отказался генерировать картинку (Цензура). Ответ: {full_text_1[:100]}...")
+            
+    urls = []
+    blobs = []
     
-    urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', raw_1)
-    blobs = re.findall(r'"(\$[A-Za-z0-9+/\-=_]{50,})"', raw_1)
+    if not is_refusal_1:
+        urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', raw_1)
+        blobs = re.findall(r'"(\$[A-Za-z0-9+/\-=_]{50,})"', raw_1)
+        
+        # Жесткая защита от возврата референсной картинки
+        if reference_images_b64 and not blobs:
+            urls = []
     
     chat_id_m = re.search(r'(c_[a-f0-9]{16})', raw_1)
     r_id_m = re.search(r'(r_[a-f0-9]{16,32})', raw_1)
@@ -576,6 +625,7 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
             req_2 = {"f.req": json.dumps([None, payload_2_str], separators=(',', ':')), "at": snlm0e}
             
             raw_target = ""
+            full_text_2 = ""
             spinner_2 = asyncio.create_task(spinner_task("Улучшаем качество (Этап 2)..."))
             try:
                 async with GLOBAL_CLIENT.stream("POST", stream_url, data=req_2, headers=req_headers, timeout=150.0) as resp:
@@ -589,7 +639,22 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
                             spinner_2.cancel()
                             print_sys("🛑 [ПРЕРВАНО] Клиент отменил генерацию картинки (Этап 2).")
                             return None
-                        if line: raw_target += line + "\n"
+                        if line: 
+                            raw_target += line + "\n"
+                            try:
+                                clean_line = re.sub(r'^\d+\s*', '', line)
+                                if clean_line.startswith('['):
+                                    parsed_data = json.loads(clean_line)
+                                    if isinstance(parsed_data, list) and len(parsed_data) > 0 and isinstance(parsed_data[0], list):
+                                        item = parsed_data[0]
+                                        if len(item) > 2 and item[0] == "wrb.fr":
+                                            inner_json_str = item[2]
+                                            if inner_json_str:
+                                                inner_data = json.loads(inner_json_str)
+                                                extracted = find_actual_response(inner_data)
+                                                if len(extracted) > len(full_text_2):
+                                                    full_text_2 = extracted
+                            except Exception: pass
             except httpx.ReadTimeout:
                 spinner_2.cancel()
                 print_sys("[❌] ОШИБКА: Тайм-аут при генерации картинки (Этап 2).")
@@ -604,9 +669,25 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
             if not raw_target: 
                 print_sys("[❌] Ошибка: Гугл вернул пустой ответ при генерации (Этап 2).")
                 return None
+                
+            is_refusal_2 = False
+            if full_text_2:
+                text_lower = full_text_2.lower()
+                refusal_phrases = ["не могу", "i cannot", "i can't", "sorry", "извините", "guidelines", "policy", "violate", "unable to", "unfortunately"]
+                if any(phrase in text_lower for phrase in refusal_phrases):
+                    is_refusal_2 = True
+                    print_sys(f"[!] ВНИМАНИЕ: Гугл отказался генерировать (Цензура). Ответ: {full_text_2[:100]}...")
             
-            urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', raw_target)
-            blobs = re.findall(r'"(\$[A-Za-z0-9+/\-=_]{50,})"', raw_target)
+            urls = []
+            blobs = []
+            
+            if not is_refusal_2:
+                urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', raw_target)
+                blobs = re.findall(r'"(\$[A-Za-z0-9+/\-=_]{50,})"', raw_target)
+                
+                if reference_images_b64 and not blobs:
+                    urls = []
+            
             final_url = urls[-1] if urls else (await download_blob_via_batchexecute(snlm0e, blobs[-1], chat_id, r_id, rc_id, prompt) if blobs else None)
     
     if final_url:
