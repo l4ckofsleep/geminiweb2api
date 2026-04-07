@@ -313,6 +313,63 @@ def find_actual_response(obj):
             if len(candidate) > len(longest): longest = candidate
     return longest
 
+def normalize_thinking_tags(text, tag_name):
+    if not isinstance(text, str):
+        return ""
+
+    open_tag = f"<{tag_name}>"
+    close_tag = f"</{tag_name}>"
+    text = re.sub(r'(?i)<think>|<thinking>', open_tag, text)
+    text = re.sub(r'(?i)</think>|</thinking>', close_tag, text)
+    return text
+
+def choose_thinking_tag(prefill_text, generated_text):
+    prefill_lower = prefill_text.lower() if isinstance(prefill_text, str) else ""
+    generated_lower = generated_text.lower() if isinstance(generated_text, str) else ""
+    if "<thinking>" in prefill_lower or "<thinking>" in generated_lower:
+        return "thinking"
+    return "think"
+
+def strip_google_leading_garbage(text):
+    if not isinstance(text, str) or not text:
+        return ""
+    return re.sub(r'^[A-Za-z0-9_/\+\-]{40,}={0,2}[^\n]*\n*', '', text, count=1)
+
+def trim_prefill_echo(text, normalized_prefill):
+    if not normalized_prefill:
+        return text
+
+    leading_ws_len = len(text) - len(text.lstrip())
+    leading_ws = text[:leading_ws_len]
+    body = text[leading_ws_len:]
+
+    if not body.startswith(normalized_prefill):
+        return text
+
+    trimmed = body[len(normalized_prefill):]
+    if normalized_prefill.endswith('>'):
+        trimmed = '\n' + trimmed.lstrip(' \t')
+    else:
+        trimmed = trimmed.lstrip(' \t')
+
+    return leading_ws + trimmed
+
+def finalize_thinking_newlines(text, close_tag):
+    text = re.sub(rf'(?i)\s*({re.escape(close_tag)})\s*', rf'\n\1\n\n', text)
+    return re.sub(r'\n{3,}', '\n\n', text)
+
+def postprocess_generated_text(generated_text, prefill_text):
+    generated_text = strip_google_leading_garbage(generated_text)
+    tag_name = choose_thinking_tag(prefill_text, generated_text)
+    open_tag = f"<{tag_name}>"
+    close_tag = f"</{tag_name}>"
+
+    final_text = normalize_thinking_tags(generated_text, tag_name)
+    normalized_prefill = normalize_thinking_tags(prefill_text, tag_name).strip()
+    final_text = trim_prefill_echo(final_text, normalized_prefill)
+    final_text = finalize_thinking_newlines(final_text, close_tag)
+    return final_text.rstrip()
+
 async def generate_text_core(request: Request, prompt, model_name="nano-banana-pro", file_content=None):
     global CURRENT_MODEL_ID, CACHED_SNLM0E
     
@@ -821,59 +878,8 @@ async def chat_completions(request: Request):
                     print_sys(f"🏁 ЗАВЕРШЕНО С ОШИБКОЙ.\n{'='*50}")
                     return
 
-                print_sys("✨ [ЭТАП 5] Умное форматирование тегов и вычитание префилла...")
-
-                # 2. Очищаем текст от мусора Гугла (хэши базы64 в начале)
-                generated_text = re.sub(r'^[A-Za-z0-9_/\+\-]{40,}={0,2}[^\n]*\n*', '', generated_text)
-
-                # 3. Определяем, какой тег предпочитает юзер (по умолчанию <think>)
-                tag_name = "think"
-                if prefill_text and "<thinking>" in prefill_text.lower():
-                    tag_name = "thinking"
-                elif "<thinking>" in generated_text.lower():
-                    tag_name = "thinking"
-
-                open_tag = f"<{tag_name}>"
-                close_tag = f"</{tag_name}>"
-
-                # 4. Унифицируем теги в сгенерированном ответе
-                generated_text = re.sub(rf'(?i)<think>|<thinking>', open_tag, generated_text)
-                generated_text = re.sub(rf'(?i)</think>|</thinking>', close_tag, generated_text)
-
-                # 5. Вычитаем "эхо" (если Гугл полностью повторил префилл Таверны)
-                final_text = generated_text
-                if prefill_text:
-                    norm_prefill = re.sub(rf'(?i)<think>|<thinking>', open_tag, prefill_text)
-
-                    norm_gen_nospace = re.sub(r'\s', '', final_text)
-                    norm_pre_nospace = re.sub(r'\s', '', norm_prefill)
-
-                    if norm_gen_nospace.startswith(norm_pre_nospace):
-                        pre_chars_count = len(norm_pre_nospace)
-                        chars_seen = 0
-                        split_idx = 0
-                        for i, char in enumerate(final_text):
-                            if not char.isspace():
-                                chars_seen += 1
-                            if chars_seen == pre_chars_count:
-                                split_idx = i + 1
-                                break
-                        if split_idx > 0:
-                            final_text = final_text[split_idx:].lstrip(' \t')
-                    else:
-                        if re.search(rf'(?i){open_tag}', norm_prefill) and final_text.lstrip().lower().startswith(open_tag.lower()):
-                            final_text = re.sub(rf'(?i)^\s*{open_tag}\s*', '\n', final_text)
-
-                # 6. Жесткое форматирование переносов для закрывающего тега
-                final_text = re.sub(rf'(?i)\s*({close_tag})\s*', rf'\n\1\n\n', final_text)
-                final_text = re.sub(r'\n{3,}', '\n\n', final_text)
-
-                # 7. Красивый стык: если префилл заканчивался тегом, гарантируем перенос перед текстом Гугла
-                if prefill_text and prefill_text.strip().endswith('>'):
-                    if not final_text.startswith('\n'):
-                        final_text = '\n' + final_text.lstrip(' \t')
-
-                final_text = final_text.rstrip()
+                print_sys("✨ [ЭТАП 5] Единая безопасная постобработка ответа...")
+                final_text = postprocess_generated_text(generated_text, prefill_text)
 
                 print_sys(f"✅ [ЭТАП 6] Текст готов к отправке (Длина: {len(final_text)}). Выдаем финальный результат...")
 
@@ -914,42 +920,8 @@ async def chat_completions(request: Request):
             print_sys("[❌] ИТОГ: Генерация прервана или завершилась сбоем. Отправляем ошибку в Таверну.")
             return JSONResponse({"error": {"message": "Request cancelled by user or failed (Check console logs)", "type": "server_error"}}, status_code=500)
 
-        print_sys("✨ [ЭТАП 5] Умное форматирование тегов и вычитание префилла...")
-
-        # (Дублируем блок форматирования для режима без стрима)
-        generated_text = re.sub(r'^[A-Za-z0-9_/\+\-]{40,}={0,2}[^\n]*\n*', '', generated_text)
-        tag_name = "think"
-        if prefill_text and "<thinking>" in prefill_text.lower(): tag_name = "thinking"
-        elif "<thinking>" in generated_text.lower(): tag_name = "thinking"
-        open_tag = f"<{tag_name}>"; close_tag = f"</{tag_name}>"
-        generated_text = re.sub(rf'(?i)<think>|<thinking>', open_tag, generated_text)
-        generated_text = re.sub(rf'(?i)</think>|</thinking>', close_tag, generated_text)
-        
-        final_text = generated_text
-        if prefill_text:
-            norm_prefill = re.sub(rf'(?i)<think>|<thinking>', open_tag, prefill_text)
-            norm_gen_nospace = re.sub(r'\s', '', final_text)
-            norm_pre_nospace = re.sub(r'\s', '', norm_prefill)
-            if norm_gen_nospace.startswith(norm_pre_nospace):
-                pre_chars_count = len(norm_pre_nospace)
-                chars_seen = 0
-                split_idx = 0
-                for i, char in enumerate(final_text):
-                    if not char.isspace(): chars_seen += 1
-                    if chars_seen == pre_chars_count:
-                        split_idx = i + 1
-                        break
-                if split_idx > 0: final_text = final_text[split_idx:].lstrip(' \t')
-            else:
-                if re.search(rf'(?i){open_tag}', norm_prefill) and final_text.lstrip().lower().startswith(open_tag.lower()):
-                    final_text = re.sub(rf'(?i)^\s*{open_tag}\s*', '\n', final_text)
-
-        final_text = re.sub(rf'(?i)\s*({close_tag})\s*', rf'\n\1\n\n', final_text)
-        final_text = re.sub(r'\n{3,}', '\n\n', final_text)
-        if prefill_text and prefill_text.strip().endswith('>'):
-            if not final_text.startswith('\n'): final_text = '\n' + final_text.lstrip(' \t')
-
-        final_text = final_text.rstrip()
+        print_sys("✨ [ЭТАП 5] Единая безопасная постобработка ответа...")
+        final_text = postprocess_generated_text(generated_text, prefill_text)
 
         print_sys(f"✅ [ЭТАП 6] Текст готов к отправке (Длина: {len(final_text)}).")
         print_sys(f"🏁 ЗАВЕРШЕНО. Сообщение доставлено в Таверну (Без стрима).\n{'='*50}")
