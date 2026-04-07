@@ -402,7 +402,9 @@ async def generate_text_core(request: Request, prompt, model_name="nano-banana-p
         clean_text = re.sub(r'(?m)^\s*\\\s*$', '', full_text)
         clean_text = clean_text.replace('\\<', '<').replace('\\>', '>').replace('\\/', '/')
         return clean_text.strip()
-        
+    except asyncio.CancelledError:
+        print_sys("🛑 [ОТМЕНЕНО] Генерация текста принудительно остановлена.")
+        raise
     except httpx.ReadTimeout:
         spinner.cancel()
         print_sys("[❌] ОШИБКА: Тайм-аут. Гугл думал слишком долго (более 150 сек).")
@@ -727,106 +729,129 @@ async def chat_completions(request: Request):
             
             # Запускаем генерацию Гугла в виде фоновой задачи
             task = asyncio.create_task(generate_text_core(request, safe_prompt, model_name=requested_model, file_content=file_content))
-            
-            # Пока задача не завершена, каждые 10 секунд кидаем пустышку (пульс), чтобы браузер не убил сокет
-            while not task.done():
-                _, pending = await asyncio.wait([task], timeout=10.0)
-                if pending:
-                    ping_chunk = {
-                        "id": cmpl_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": requested_model,
-                        "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": None}]
-                    }
-                    yield f"data: {json.dumps(ping_chunk)}\n\n"
-            
-            # Получаем реальный результат
-            generated_text = task.result()
+            try:
+                # Пока задача не завершена, каждые 10 секунд кидаем пустышку (пульс), чтобы браузер не убил сокет
+                while not task.done():
+                    if await request.is_disconnected():
+                        print_sys("🛑 [ПРЕРВАНО] SSE-клиент отключился во время ожидания ответа. Отменяем генерацию.")
+                        task.cancel()
+                        return
 
-            if generated_text is None:
-                err_chunk = {"id": cmpl_id, "object": "chat.completion.chunk", "created": created, "model": requested_model, "choices": [{"index": 0, "delta": {"content": "\n[❌ Ошибка генерации. Проверьте логи сервера]"}, "finish_reason": "stop"}]}
-                yield f"data: {json.dumps(err_chunk)}\n\n"
+                    _, pending = await asyncio.wait([task], timeout=10.0)
+                    if pending:
+                        ping_chunk = {
+                            "id": cmpl_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": requested_model,
+                            "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": None}]
+                        }
+                        yield f"data: {json.dumps(ping_chunk)}\n\n"
+
+                try:
+                    # Получаем реальный результат
+                    generated_text = task.result()
+                except asyncio.CancelledError:
+                    print_sys(f"🏁 ЗАВЕРШЕНО. Стрим был отменен клиентом.\n{'='*50}")
+                    return
+                except Exception as e:
+                    print_sys(f"[❌] ОШИБКА ФОНОВОЙ ГЕНЕРАЦИИ: {e}")
+                    err_chunk = {"id": cmpl_id, "object": "chat.completion.chunk", "created": created, "model": requested_model, "choices": [{"index": 0, "delta": {"content": "\n[❌ Ошибка генерации. Проверьте логи сервера]"}, "finish_reason": "stop"}]}
+                    yield f"data: {json.dumps(err_chunk)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    print_sys(f"🏁 ЗАВЕРШЕНО С ОШИБКОЙ.\n{'='*50}")
+                    return
+
+                if generated_text is None:
+                    err_chunk = {"id": cmpl_id, "object": "chat.completion.chunk", "created": created, "model": requested_model, "choices": [{"index": 0, "delta": {"content": "\n[❌ Ошибка генерации. Проверьте логи сервера]"}, "finish_reason": "stop"}]}
+                    yield f"data: {json.dumps(err_chunk)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    print_sys(f"🏁 ЗАВЕРШЕНО С ОШИБКОЙ.\n{'='*50}")
+                    return
+
+                print_sys("✨ [ЭТАП 5] Умное форматирование тегов и вычитание префилла...")
+
+                # 2. Очищаем текст от мусора Гугла (хэши базы64 в начале)
+                generated_text = re.sub(r'^[A-Za-z0-9_/\+\-]{40,}={0,2}[^\n]*\n*', '', generated_text)
+
+                # 3. Определяем, какой тег предпочитает юзер (по умолчанию <think>)
+                tag_name = "think"
+                if prefill_text and "<thinking>" in prefill_text.lower():
+                    tag_name = "thinking"
+                elif "<thinking>" in generated_text.lower():
+                    tag_name = "thinking"
+
+                open_tag = f"<{tag_name}>"
+                close_tag = f"</{tag_name}>"
+
+                # 4. Унифицируем теги в сгенерированном ответе
+                generated_text = re.sub(rf'(?i)<think>|<thinking>', open_tag, generated_text)
+                generated_text = re.sub(rf'(?i)</think>|</thinking>', close_tag, generated_text)
+
+                # 5. Вычитаем "эхо" (если Гугл полностью повторил префилл Таверны)
+                final_text = generated_text
+                if prefill_text:
+                    norm_prefill = re.sub(rf'(?i)<think>|<thinking>', open_tag, prefill_text)
+
+                    norm_gen_nospace = re.sub(r'\s', '', final_text)
+                    norm_pre_nospace = re.sub(r'\s', '', norm_prefill)
+
+                    if norm_gen_nospace.startswith(norm_pre_nospace):
+                        pre_chars_count = len(norm_pre_nospace)
+                        chars_seen = 0
+                        split_idx = 0
+                        for i, char in enumerate(final_text):
+                            if not char.isspace():
+                                chars_seen += 1
+                            if chars_seen == pre_chars_count:
+                                split_idx = i + 1
+                                break
+                        if split_idx > 0:
+                            final_text = final_text[split_idx:].lstrip(' \t')
+                    else:
+                        if re.search(rf'(?i){open_tag}', norm_prefill) and final_text.lstrip().lower().startswith(open_tag.lower()):
+                            final_text = re.sub(rf'(?i)^\s*{open_tag}\s*', '\n', final_text)
+
+                # 6. Жесткое форматирование переносов для закрывающего тега
+                final_text = re.sub(rf'(?i)\s*({close_tag})\s*', rf'\n\1\n\n', final_text)
+                final_text = re.sub(r'\n{3,}', '\n\n', final_text)
+
+                # 7. Красивый стык: если префилл заканчивался тегом, гарантируем перенос перед текстом Гугла
+                if prefill_text and prefill_text.strip().endswith('>'):
+                    if not final_text.startswith('\n'):
+                        final_text = '\n' + final_text.lstrip(' \t')
+
+                final_text = final_text.rstrip()
+
+                print_sys(f"✅ [ЭТАП 6] Текст готов к отправке (Длина: {len(final_text)}). Выдаем финальный результат...")
+
+                response_chunk = {
+                    "id": cmpl_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": requested_model,
+                    "choices": [{"index": 0, "delta": {"content": final_text}, "finish_reason": None}]
+                }
+                yield f"data: {json.dumps(response_chunk)}\n\n"
+
+                final_chunk = {
+                    "id": cmpl_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": requested_model,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                }
+                yield f"data: {json.dumps(final_chunk)}\n\n"
                 yield "data: [DONE]\n\n"
-                print_sys(f"🏁 ЗАВЕРШЕНО С ОШИБКОЙ.\n{'='*50}")
-                return
-
-            print_sys("✨ [ЭТАП 5] Умное форматирование тегов и вычитание префилла...")
-
-            # 2. Очищаем текст от мусора Гугла (хэши базы64 в начале)
-            generated_text = re.sub(r'^[A-Za-z0-9_/\+\-]{40,}={0,2}[^\n]*\n*', '', generated_text)
-
-            # 3. Определяем, какой тег предпочитает юзер (по умолчанию <think>)
-            tag_name = "think"
-            if prefill_text and "<thinking>" in prefill_text.lower():
-                tag_name = "thinking"
-            elif "<thinking>" in generated_text.lower():
-                tag_name = "thinking"
-                
-            open_tag = f"<{tag_name}>"
-            close_tag = f"</{tag_name}>"
-
-            # 4. Унифицируем теги в сгенерированном ответе
-            generated_text = re.sub(rf'(?i)<think>|<thinking>', open_tag, generated_text)
-            generated_text = re.sub(rf'(?i)</think>|</thinking>', close_tag, generated_text)
-            
-            # 5. Вычитаем "эхо" (если Гугл полностью повторил префилл Таверны)
-            final_text = generated_text
-            if prefill_text:
-                norm_prefill = re.sub(rf'(?i)<think>|<thinking>', open_tag, prefill_text)
-                
-                norm_gen_nospace = re.sub(r'\s', '', final_text)
-                norm_pre_nospace = re.sub(r'\s', '', norm_prefill)
-                
-                if norm_gen_nospace.startswith(norm_pre_nospace):
-                    pre_chars_count = len(norm_pre_nospace)
-                    chars_seen = 0
-                    split_idx = 0
-                    for i, char in enumerate(final_text):
-                        if not char.isspace():
-                            chars_seen += 1
-                        if chars_seen == pre_chars_count:
-                            split_idx = i + 1
-                            break
-                    if split_idx > 0:
-                        final_text = final_text[split_idx:].lstrip(' \t')
-                else:
-                    if re.search(rf'(?i){open_tag}', norm_prefill) and final_text.lstrip().lower().startswith(open_tag.lower()):
-                        final_text = re.sub(rf'(?i)^\s*{open_tag}\s*', '\n', final_text)
-
-            # 6. Жесткое форматирование переносов для закрывающего тега
-            final_text = re.sub(rf'(?i)\s*({close_tag})\s*', rf'\n\1\n\n', final_text)
-            final_text = re.sub(r'\n{3,}', '\n\n', final_text)
-            
-            # 7. Красивый стык: если префилл заканчивался тегом, гарантируем перенос перед текстом Гугла
-            if prefill_text and prefill_text.strip().endswith('>'):
-                if not final_text.startswith('\n'):
-                    final_text = '\n' + final_text.lstrip(' \t')
-
-            final_text = final_text.rstrip()
-
-            print_sys(f"✅ [ЭТАП 6] Текст готов к отправке (Длина: {len(final_text)}). Выдаем финальный результат...")
-            
-            response_chunk = {
-                "id": cmpl_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": requested_model,
-                "choices": [{"index": 0, "delta": {"content": final_text}, "finish_reason": None}]
-            }
-            yield f"data: {json.dumps(response_chunk)}\n\n"
-            
-            final_chunk = {
-                "id": cmpl_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": requested_model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
-            }
-            yield f"data: {json.dumps(final_chunk)}\n\n"
-            yield "data: [DONE]\n\n"
-            print_sys(f"🏁 ЗАВЕРШЕНО. Сообщение доставлено в Таверну.\n{'='*50}")
-            
+                print_sys(f"🏁 ЗАВЕРШЕНО. Сообщение доставлено в Таверну.\n{'='*50}")
+            finally:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+             
         return StreamingResponse(sse_stream(), media_type='text/event-stream')
 
     else:
