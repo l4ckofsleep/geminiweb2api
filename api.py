@@ -178,6 +178,7 @@ async def keep_alive_worker():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _ = await init_session()
     task = asyncio.create_task(keep_alive_worker())
     yield
     task.cancel()
