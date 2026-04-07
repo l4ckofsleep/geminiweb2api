@@ -445,9 +445,13 @@ async def upload_image_to_gemini(image_bytes):
     }
     try:
         res = await GLOBAL_CLIENT.post(url, headers=headers_start, content=b"", timeout=15.0)
-        if res.status_code != 200: return None, None, None
+        if res.status_code != 200:
+            print_sys(f"[❌] Ошибка загрузки изображения (Старт): HTTP {res.status_code}")
+            return None, None, None
         upload_url = res.headers.get("X-Goog-Upload-URL")
-        if not upload_url: return None, None, None
+        if not upload_url:
+            print_sys("[❌] Ошибка загрузки изображения: Google не вернул X-Goog-Upload-URL.")
+            return None, None, None
             
         headers_upload = {
             "Authority": "content-push.googleapis.com",
@@ -459,8 +463,11 @@ async def upload_image_to_gemini(image_bytes):
             "Content-Type": "application/octet-stream" 
         }
         res_upload = await GLOBAL_CLIENT.post(upload_url, headers=headers_upload, content=image_bytes, timeout=30.0)
-        if res_upload.status_code == 200: return res_upload.text.strip(), mime_type, ext
-    except Exception: pass
+        if res_upload.status_code == 200:
+            return res_upload.text.strip(), mime_type, ext
+        print_sys(f"[❌] Ошибка загрузки изображения (Финализация): HTTP {res_upload.status_code}")
+    except Exception as e:
+        print_sys(f"[❌] Исключение при загрузке изображения: {e}")
     return None, None, None
 
 async def download_blob_via_batchexecute(snlm0e, blob, chat_id, r_id, rc_id, prompt):
@@ -470,9 +477,15 @@ async def download_blob_via_batchexecute(snlm0e, blob, chat_id, r_id, rc_id, pro
     req_data = {"f.req": json.dumps([[["c8o8Fe", inner_json, None, "generic"]]], separators=(',', ':')), "at": snlm0e}
     try:
         resp = await GLOBAL_CLIENT.post(url, data=req_data, timeout=15.0)
+        if resp.status_code != 200:
+            print_sys(f"[❌] Ошибка получения blob-картинки: HTTP {resp.status_code}")
+            return None
         urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', resp.text)
-        if urls: return urls[-1]
-    except Exception: pass
+        if urls:
+            return urls[-1]
+        print_sys("[❌] Blob-ответ получен, но URL картинки в нем не найден.")
+    except Exception as e:
+        print_sys(f"[❌] Исключение при получении blob-картинки: {e}")
     return None
 
 async def generate_image_core(request: Request, prompt, reference_images_b64=None, model_name="nano-banana-pro"):
@@ -485,7 +498,9 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
                 img_bytes = base64.b64decode(b64)
                 ref_id, mime_type, ext = await upload_image_to_gemini(img_bytes)
                 if ref_id is not None: ref_data_list.append((ref_id, mime_type, ext))
-            except Exception: pass
+                else: print_sys("[!] Референсное изображение не удалось загрузить, пропускаем его.")
+            except Exception as e:
+                print_sys(f"[❌] Невалидное или битое референсное изображение: {e}")
         if ref_data_list:
             images_json_list = []
             for i, (ref_id, mime_type, ext) in enumerate(ref_data_list):
@@ -520,14 +535,27 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
     spinner = asyncio.create_task(spinner_task("Рисуем картинку (Этап 1)..."))
     try:
         async with GLOBAL_CLIENT.stream("POST", stream_url, data=req_data, headers=req_headers, timeout=150.0) as resp:
+            if resp.status_code != 200:
+                print_sys(f"[❌] ОШИБКА GOOGLE API (Картинки, этап 1): HTTP {resp.status_code}")
+                return None
             async for line in resp.aiter_lines():
-                if request and await request.is_disconnected(): return None
+                if request and await request.is_disconnected():
+                    print_sys("🛑 [ПРЕРВАНО] Клиент отменил генерацию картинки на 1 этапе.")
+                    return None
                 if line: raw_1 += line + "\n"
-    except Exception: pass
+    except asyncio.CancelledError:
+        print_sys("🛑 [ОТМЕНЕНО] Генерация картинки принудительно остановлена на 1 этапе.")
+        raise
+    except httpx.ReadTimeout:
+        print_sys("[❌] Тайм-аут генерации картинки на 1 этапе.")
+    except Exception as e:
+        print_sys(f"[❌] Исключение в потоке генерации картинки (Этап 1): {e}")
     finally:
         if not spinner.done(): spinner.cancel()
         
-    if not raw_1: return None
+    if not raw_1:
+        print_sys("[❌] Google не вернул данных на 1 этапе генерации картинки.")
+        return None
     
     urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', raw_1)
     blobs = re.findall(r'"(\$[A-Za-z0-9+/\-=_]{50,})"', raw_1)
@@ -549,7 +577,13 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
         tokens = re.findall(r'(Aw[A-Za-z0-9_-]{20,}|![A-Za-z0-9_-]{20,})', raw_1)
         state_token = max(tokens, key=len) if tokens else ""
 
-        if is_pro_model and chat_id:
+        if not is_pro_model:
+            print_sys("[!] Второй этап генерации доступен только для Pro-модели. Останавливаемся после 1 этапа.")
+        elif not chat_id:
+            print_sys("[❌] Второй этап невозможен: chat_id не найден в ответе 1 этапа.")
+        elif not state_token:
+            print_sys("[❌] Второй этап невозможен: state token не найден в ответе 1 этапа.")
+        else:
             candidate_2 = uuid.uuid4().hex  
             payload_2_str = f"""[[{json.dumps(prompt)},0,null,{image_part},null,null,0,null,null,[null,null,null,null,null,null,[null,[1]]]],["ru"],[{json.dumps(chat_id)},"","",null,null,null,null,null,null,""],{json.dumps(state_token)},{json.dumps(candidate_2)},null,[1],1,null,null,1,0,null,null,null,null,null,[[0]],0,null,null,null,null,null,null,null,null,1,null,null,[4],null,1,null,null,null,null,null,null,null,null,[1],null,null,null,{temp_chat_flag},null,null,null,null,null,null,null,0,null,null,null,null,null,{json.dumps(device_id)},null,[],null,null,null,null,null,null,2,null,null,null,7]"""
             req_2 = {"f.req": json.dumps([None, payload_2_str], separators=(',', ':')), "at": snlm0e}
@@ -558,14 +592,27 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
             spinner_2 = asyncio.create_task(spinner_task("Улучшаем качество (Этап 2)..."))
             try:
                 async with GLOBAL_CLIENT.stream("POST", stream_url, data=req_2, headers=req_headers, timeout=150.0) as resp:
+                    if resp.status_code != 200:
+                        print_sys(f"[❌] ОШИБКА GOOGLE API (Картинки, этап 2): HTTP {resp.status_code}")
+                        return None
                     async for line in resp.aiter_lines():
-                        if request and await request.is_disconnected(): return None
+                        if request and await request.is_disconnected():
+                            print_sys("🛑 [ПРЕРВАНО] Клиент отменил генерацию картинки на 2 этапе.")
+                            return None
                         if line: raw_target += line + "\n"
-            except Exception: pass
+            except asyncio.CancelledError:
+                print_sys("🛑 [ОТМЕНЕНО] Генерация картинки принудительно остановлена на 2 этапе.")
+                raise
+            except httpx.ReadTimeout:
+                print_sys("[❌] Тайм-аут генерации картинки на 2 этапе.")
+            except Exception as e:
+                print_sys(f"[❌] Исключение в потоке генерации картинки (Этап 2): {e}")
             finally:
                 if not spinner_2.done(): spinner_2.cancel()
                 
-            if not raw_target: return None
+            if not raw_target:
+                print_sys("[❌] Google не вернул данных на 2 этапе генерации картинки.")
+                return None
             
             urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', raw_target)
             blobs = re.findall(r'"(\$[A-Za-z0-9+/\-=_]{50,})"', raw_target)
@@ -580,7 +627,11 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
                 filepath = os.path.join(OUTPUT_DIR, f"{uuid.uuid4().hex}.png")
                 with open(filepath, 'wb') as f: f.write(img_r.content)
                 return filepath
-        except Exception: pass
+            print_sys(f"[❌] Ошибка скачивания финальной картинки: HTTP {img_r.status_code}")
+        except Exception as e:
+            print_sys(f"[❌] Исключение при сохранении финальной картинки: {e}")
+    else:
+        print_sys("[❌] Финальный URL картинки не был получен.")
     return None
 
 @app.get('/v1/models')
@@ -664,7 +715,8 @@ async def unified_image_generation(request: Request, model: str = None):
 
     image_path = await generate_image_core(request, prompt, reference_images_b64=reference_images_b64, model_name=requested_model)
     
-    if not image_path: return JSONResponse({"error": "Failed"}, status_code=500)
+    if not image_path:
+        return JSONResponse({"error": "Failed to generate image. Check server logs for details."}, status_code=500)
     with open(image_path, "rb") as f: b64_data = base64.b64encode(f.read()).decode('utf-8')
 
     created_timestamp = int(time.time())
