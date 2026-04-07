@@ -147,7 +147,7 @@ async def init_session():
                 print_sys("[+] Отлично! Сессия валидна, доступ к Gemini разрешен.")
                 return True
             else:
-                print_sys("[❌] Google отверг текущие куки.")
+                print_sys("[!] Текущая сессия больше не подходит. Нужна повторная проверка куков.")
                 return False
         else:
             print_sys("[!] Внимание: В файле сессии не найдены нужные куки. Возможно, сессия устарела.")
@@ -178,10 +178,6 @@ async def keep_alive_worker():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    session_ok = await init_session()
-    if not session_ok:
-        print_sys("[❌] Куки недействительны. Возвращаемся в лаунчер и пробуем один автоматический refresh...")
-        raise SystemExit(SESSION_INVALID_EXIT_CODE)
     task = asyncio.create_task(keep_alive_worker())
     yield
     task.cancel()
@@ -1060,5 +1056,9 @@ async def chat_completions(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
+    session_ok = asyncio.run(init_session())
+    if not session_ok:
+        print_sys("[!] Куки устарели или стали недействительными. Возвращаемся в лаунчер и пробуем один автоматический refresh...")
+        raise SystemExit(SESSION_INVALID_EXIT_CODE)
     print_sys(f"\n[*] Geminiweb2API запущен! (Порт: {PORT})")
     uvicorn.run("api:app", host="0.0.0.0", port=PORT, log_level="warning")

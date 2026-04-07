@@ -60,7 +60,7 @@ def run_auth_pc(proxy_url=None):
     return subprocess.run(args)
 
 def run_auto_refresh_pc(proxy_url=None):
-    print("\n[!] Куки устарели или повреждены. Пробуем один автоматический refresh...")
+    print("\n[!] Старая сессия больше не подходит. Пробуем один раз автоматически обновить куки...")
     if os.path.exists(STATE_FILE):
         os.remove(STATE_FILE)
         print(f"[*] Старый файл {STATE_FILE} удален. Профиль браузера сохранен.")
@@ -135,14 +135,16 @@ def main():
         if (not mobile) and api_result.returncode == SESSION_INVALID_EXIT_CODE:
             refresh_result = run_auto_refresh_pc(proxy_url)
             if refresh_result.returncode != 0 or not os.path.exists(STATE_FILE):
-                print("\n[❌] Автоматическое обновление сессии не удалось.")
-                print("[!] Проверь, что Gemini открывается в браузере, а профиль не сломан. Если нужно, запусти start.py --reauth.")
+                print("\n[❌] Не удалось автоматически обновить сессию.")
+                print("[!] Проверь, что Gemini открывается в браузере и аккаунт там все еще авторизован.")
+                print("[!] Если не поможет, запусти start.py --reauth и войди заново.")
                 sys.exit(1)
 
             api_result = run_api(extra_api_args)
             if api_result.returncode == SESSION_INVALID_EXIT_CODE:
-                print("\n[❌] Мы один раз автоматически обновили сессию, но Google всё ещё не принимает куки.")
-                print("[!] Скорее всего, профиль разлогинен, поврежден или нужен ручной start.py --reauth.")
+                print("\n[❌] Мы один раз обновили сессию, но Google всё равно не принял новые куки.")
+                print("[!] Скорее всего, аккаунт разлогинен в браузере или сессия уже окончательно протухла.")
+                print("[!] Запусти start.py --reauth и пройди вход заново.")
                 sys.exit(1)
 
             if api_result.returncode != 0:
