@@ -37,6 +37,7 @@ OUTPUT_DIR = "generated_images"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 LOG_FILE = "logs.txt"
+SESSION_INVALID_EXIT_CODE = 86
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -146,7 +147,7 @@ async def init_session():
                 print_sys("[+] Отлично! Сессия валидна, доступ к Gemini разрешен.")
                 return True
             else:
-                print_sys("[❌] ВНИМАНИЕ: Гугл отверг куки. Рекомендуется перезапуск с флагом --reauth.")
+                print_sys("[❌] Google отверг текущие куки.")
                 return False
         else:
             print_sys("[!] Внимание: В файле сессии не найдены нужные куки. Возможно, сессия устарела.")
@@ -177,7 +178,10 @@ async def keep_alive_worker():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_session()
+    session_ok = await init_session()
+    if not session_ok:
+        print_sys("[❌] Куки недействительны. Возвращаемся в лаунчер и пробуем один автоматический refresh...")
+        raise SystemExit(SESSION_INVALID_EXIT_CODE)
     task = asyncio.create_task(keep_alive_worker())
     yield
     task.cancel()
@@ -358,15 +362,136 @@ def finalize_thinking_newlines(text, close_tag):
     text = re.sub(rf'(?i)\s*({re.escape(close_tag)})\s*', rf'\n\1\n\n', text)
     return re.sub(r'\n{3,}', '\n\n', text)
 
+def enforce_opening_think_newline(text, tag_name):
+    if not text:
+        return ""
+
+    open_tag = f"<{tag_name}>"
+    return re.sub(rf'(?is)^\s*{re.escape(open_tag)}(?!\n)', f"{open_tag}\n", text, count=1)
+
+def split_infoblock_suffix(text):
+    if not isinstance(text, str) or not text:
+        return "", ""
+
+    match = re.search(r'(?is)^(.*?)(<infoblock\b.*?</infoblock>)\s*$', text)
+    if not match:
+        return text, ""
+
+    return match.group(1), match.group(2)
+
+def extract_leading_think_block(text, tag_name):
+    if not isinstance(text, str) or not text:
+        return "", text, False
+
+    open_tag = f"<{tag_name}>"
+    close_tag = f"</{tag_name}>"
+    full_block_pattern = rf'(?is)^\s*({re.escape(open_tag)}.*?{re.escape(close_tag)})(.*)$'
+    match = re.match(full_block_pattern, text)
+    if match:
+        return match.group(1), match.group(2), True
+
+    stripped = text.lstrip()
+    if stripped.startswith(open_tag):
+        content = stripped[len(open_tag):].strip('\n\r \t')
+        if content:
+            repaired_block = f"{open_tag}\n{content}\n{close_tag}"
+            return repaired_block, "", False
+
+    return "", text, False
+
+def format_think_block(think_block, tag_name, is_valid_block):
+    if not think_block:
+        return ""
+
+    open_tag = f"<{tag_name}>"
+    close_tag = f"</{tag_name}>"
+    think_block = think_block.strip()
+
+    if is_valid_block:
+        think_block = re.sub(rf'(?is)^\s*{re.escape(open_tag)}\s*', f"{open_tag}\n", think_block, count=1)
+        think_block = re.sub(rf'(?is)\s*{re.escape(close_tag)}\s*$', f"\n{close_tag}", think_block, count=1)
+        return think_block.strip()
+
+    if think_block.startswith(open_tag) and think_block.endswith(close_tag):
+        think_content = think_block[len(open_tag):-len(close_tag)].strip('\n\r \t')
+    else:
+        think_content = think_block.strip('\n\r \t')
+
+    if not think_content:
+        return ""
+
+    return f"{open_tag}\n{think_content}\n{close_tag}"
+
+def normalize_infoblock_html(infoblock_html):
+    if not infoblock_html:
+        return ""
+
+    infoblock_html = infoblock_html.strip()
+
+    def encode_url_for_html_attr(url):
+        return (
+            url
+            .replace('&', '&amp;')
+            .replace(':', '&#58;')
+            .replace('/', '&#47;')
+            .replace('?', '&#63;')
+            .replace('=', '&#61;')
+        )
+
+    def protect_url_attributes(match):
+        attr_name = match.group(1)
+        quote = match.group(2)
+        url = match.group(3)
+        markdown_url_match = re.match(r'^\[(https?://[^\]]+)\]\((https?://[^\)]+)\)$', url)
+        if markdown_url_match:
+            first_url = markdown_url_match.group(1)
+            second_url = markdown_url_match.group(2)
+            url = second_url if second_url == first_url or second_url else first_url
+
+        protected_url = encode_url_for_html_attr(url)
+        return f'{attr_name}={quote}{protected_url}{quote}'
+
+    return re.sub(
+        r'(?i)\b(src|href)\s*=\s*(["\'])(.*?)(\2)',
+        protect_url_attributes,
+        infoblock_html
+    )
+
 def postprocess_generated_text(generated_text, prefill_text):
     generated_text = strip_google_leading_garbage(generated_text)
     tag_name = choose_thinking_tag(prefill_text, generated_text)
-    open_tag = f"<{tag_name}>"
     close_tag = f"</{tag_name}>"
 
     final_text = normalize_thinking_tags(generated_text, tag_name)
     normalized_prefill = normalize_thinking_tags(prefill_text, tag_name).strip()
+    preserve_prefill_newline = normalized_prefill.endswith('>')
     final_text = trim_prefill_echo(final_text, normalized_prefill)
+
+    main_text, infoblock_html = split_infoblock_suffix(final_text)
+    think_block, body_text, is_valid_think_block = extract_leading_think_block(main_text, tag_name)
+
+    think_block = format_think_block(think_block, tag_name, is_valid_think_block)
+    if think_block:
+        body_text = body_text.lstrip('\n\r \t')
+    elif preserve_prefill_newline and body_text.startswith(('\n', '\r')):
+        body_text = body_text.rstrip(' \t\n\r')
+    else:
+        body_text = body_text.strip()
+    infoblock_html = normalize_infoblock_html(infoblock_html)
+
+    parts = []
+    if think_block:
+        parts.append(think_block)
+    if body_text:
+        parts.append(body_text)
+
+    final_text = "\n\n".join(parts)
+    if final_text and infoblock_html:
+        final_text = f"{final_text}\n\n{infoblock_html}"
+    elif infoblock_html:
+        final_text = infoblock_html
+
+    final_text = enforce_opening_think_newline(final_text, tag_name)
     final_text = finalize_thinking_newlines(final_text, close_tag)
     return final_text.rstrip()
 

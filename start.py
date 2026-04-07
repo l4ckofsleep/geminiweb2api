@@ -6,6 +6,7 @@ import shutil
 
 STATE_FILE = "google_state.json"
 PROFILE_DIR = "chrome_profile"
+SESSION_INVALID_EXIT_CODE = 86
 
 def is_mobile():
     if 'com.termux' in os.environ.get('PREFIX', ''): return True
@@ -56,12 +57,19 @@ def run_auth_pc(proxy_url=None):
     args = [sys.executable, "auth.py"]
     if proxy_url:
         args.extend(["--proxy", proxy_url])
-    subprocess.run(args)
+    return subprocess.run(args)
+
+def run_auto_refresh_pc(proxy_url=None):
+    print("\n[!] Куки устарели или повреждены. Пробуем один автоматический refresh...")
+    if os.path.exists(STATE_FILE):
+        os.remove(STATE_FILE)
+        print(f"[*] Старый файл {STATE_FILE} удален. Профиль браузера сохранен.")
+    return run_auth_pc(proxy_url)
 
 def run_api(extra_args):
     print("\n[*] Запуск главного сервера API...")
     args = [sys.executable, "api.py"] + extra_args
-    subprocess.run(args)
+    return subprocess.run(args)
 
 def main():
     print("=" * 40)
@@ -114,14 +122,33 @@ def main():
             os.remove(STATE_FILE)
             print(f"[*] Старый файл {STATE_FILE} удален. Профиль браузера сохранен.")
     
+    mobile = is_mobile()
+
     if not os.path.exists(STATE_FILE):
-        if is_mobile():
+        if mobile:
             run_auth_mobile()
         else:
             run_auth_pc(proxy_url)
 
     if os.path.exists(STATE_FILE):
-        run_api(extra_api_args)
+        api_result = run_api(extra_api_args)
+        if (not mobile) and api_result.returncode == SESSION_INVALID_EXIT_CODE:
+            refresh_result = run_auto_refresh_pc(proxy_url)
+            if refresh_result.returncode != 0 or not os.path.exists(STATE_FILE):
+                print("\n[❌] Автоматическое обновление сессии не удалось.")
+                print("[!] Проверь, что Gemini открывается в браузере, а профиль не сломан. Если нужно, запусти start.py --reauth.")
+                sys.exit(1)
+
+            api_result = run_api(extra_api_args)
+            if api_result.returncode == SESSION_INVALID_EXIT_CODE:
+                print("\n[❌] Мы один раз автоматически обновили сессию, но Google всё ещё не принимает куки.")
+                print("[!] Скорее всего, профиль разлогинен, поврежден или нужен ручной start.py --reauth.")
+                sys.exit(1)
+
+            if api_result.returncode != 0:
+                sys.exit(api_result.returncode)
+        elif api_result.returncode != 0:
+            sys.exit(api_result.returncode)
     else:
         print("\n[!] Ошибка: Авторизация не была завершена.")
         print("[!] Файл google_state.json не создан. Сервер не может быть запущен.")
