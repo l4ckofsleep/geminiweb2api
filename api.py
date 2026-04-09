@@ -944,6 +944,8 @@ def normalize_requested_model(model_name):
     normalized = str(model_name or "").lower()
     if normalized in ["gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3.0-pro-preview"]:
         return "gemini-3.1-pro-preview"
+    if normalized == "gemini-3-flash-preview":
+        return "gemini-3.0-flash-preview"
     return normalized
 
 def build_chat_history_from_gemini_contents(contents):
