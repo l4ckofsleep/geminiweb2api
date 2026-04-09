@@ -37,6 +37,9 @@ OUTPUT_DIR = "generated_images"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 LOG_FILE = "logs.txt"
+STATE_FILE = "google_state.json"
+TOKEN_STATE_KEY = "snlm0e"
+TOKEN_UPDATED_AT_KEY = "snlm0e_updated_at"
 SESSION_INVALID_EXIT_CODE = 86
 
 HEADERS = {
@@ -59,6 +62,87 @@ GLOBAL_CLIENT = httpx.AsyncClient(**client_kwargs)
 # --- Глобальный кэш для снижения спама запросами ---
 CACHED_SNLM0E = None
 CURRENT_MODEL_ID = None
+session_initialized = False
+
+def load_state_file():
+    if not os.path.exists(STATE_FILE):
+        return None
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        return state if isinstance(state, dict) else None
+    except Exception:
+        return None
+
+def save_state_file(state):
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        return True
+    except Exception:
+        return False
+
+def load_saved_snlm0e(state=None):
+    if state is None:
+        state = load_state_file()
+    if not isinstance(state, dict):
+        return None
+    token = state.get(TOKEN_STATE_KEY)
+    if isinstance(token, str):
+        token = token.strip()
+        if token:
+            return token
+    return None
+
+def persist_snlm0e(token):
+    if not isinstance(token, str):
+        return
+    token = token.strip()
+    if not token:
+        return
+
+    state = load_state_file() or {}
+    if not isinstance(state, dict):
+        state = {}
+    state[TOKEN_STATE_KEY] = token
+    state[TOKEN_UPDATED_AT_KEY] = int(time.time())
+    save_state_file(state)
+
+def clear_saved_snlm0e():
+    state = load_state_file()
+    if not isinstance(state, dict):
+        return
+    changed = False
+    for key in [TOKEN_STATE_KEY, TOKEN_UPDATED_AT_KEY]:
+        if key in state:
+            state.pop(key, None)
+            changed = True
+    if changed:
+        save_state_file(state)
+
+def can_refresh_token_from_cookies():
+    return bool(GLOBAL_CLIENT.headers.get("Authorization"))
+
+def invalidate_cached_snlm0e(clear_saved=False):
+    global CACHED_SNLM0E
+    CACHED_SNLM0E = None
+    if clear_saved:
+        clear_saved_snlm0e()
+
+async def refresh_snlm0e_from_cookies(reason):
+    if not can_refresh_token_from_cookies():
+        print_sys(f"[!] {reason}: не удалось обновить токен по кукам — в памяти нет рабочей cookie-сессии.")
+        return None
+
+    print_sys(f"[!] {reason}: сохраненный токен не подошел. Пробуем тихо обновить его по кукам...")
+    invalidate_cached_snlm0e(clear_saved=True)
+    refreshed = await get_snlm0e(force_refresh=True)
+    if refreshed:
+        print_sys("[+] Токен успешно обновлен по кукам.")
+        return refreshed
+
+    print_sys("[!] Обновить токен по кукам не удалось.")
+    return None
 
 def print_sys(msg):
     """Кастомный принт: пишет в консоль (затирая крутилку) и сохраняет в logs.txt"""
@@ -93,6 +177,13 @@ async def get_snlm0e(force_refresh=False):
     global CACHED_SNLM0E
     if CACHED_SNLM0E and not force_refresh:
         return CACHED_SNLM0E
+
+    if not force_refresh:
+        saved_token = load_saved_snlm0e()
+        if saved_token:
+            CACHED_SNLM0E = saved_token
+            if IS_DEBUG: print_sys("[DEBUG] Загружен сохраненный токен SNlM0e из google_state.json.")
+            return CACHED_SNLM0E
         
     if IS_DEBUG: print_sys("[DEBUG] Скачивание главной страницы для получения токена SNlM0e...")
     try:
@@ -102,6 +193,7 @@ async def get_snlm0e(force_refresh=False):
             print_sys("[❌] КРИТИЧЕСКАЯ ОШИБКА: Токен SNlM0e не найден. Куки протухли или нужен VPN.")
             return None
         CACHED_SNLM0E = match.group(1)
+        persist_snlm0e(CACHED_SNLM0E)
         if IS_DEBUG: print_sys("[DEBUG] Токен SNlM0e успешно обновлен и кэширован.")
         return CACHED_SNLM0E
     except Exception as e: 
@@ -111,18 +203,21 @@ async def get_snlm0e(force_refresh=False):
 async def init_session():
     print_sys("[*] Загрузка сессии из google_state.json...")
     GLOBAL_CLIENT.cookies.clear()
-    global CACHED_SNLM0E, CURRENT_MODEL_ID
+    GLOBAL_CLIENT.headers.pop("Authorization", None)
+    global CACHED_SNLM0E, CURRENT_MODEL_ID, session_initialized
     CACHED_SNLM0E = None
     CURRENT_MODEL_ID = None
+    session_initialized = False
     
-    state_file = "google_state.json"
-    if not os.path.exists(state_file):
+    if not os.path.exists(STATE_FILE):
         print_sys("[!] Ошибка: Файл google_state.json не найден.")
         return False
         
     try:
-        with open(state_file, "r", encoding="utf-8") as f:
-            state = json.load(f)
+        state = load_state_file()
+        if not isinstance(state, dict):
+            print_sys("[!] Ошибка: Файл google_state.json поврежден или пуст.")
+            return False
             
         sapisid = None
         has_base_cookie = False
@@ -140,15 +235,24 @@ async def init_session():
             hash_str = f"{timestamp} {sapisid} https://gemini.google.com"
             sha1 = hashlib.sha1(hash_str.encode()).hexdigest()
             GLOBAL_CLIENT.headers.update({"Authorization": f"SAPISIDHASH {timestamp}_{sha1}"})
-            print_sys("[+] Сессия загружена из файла. Проверяем валидность куков...")
-            
+        
+        saved_token = load_saved_snlm0e(state)
+        if saved_token:
+            CACHED_SNLM0E = saved_token
+            session_initialized = True
+            print_sys("[+] Найден сохраненный токен SNlM0e. Сначала работаем через него, а куки оставляем для keep-alive и аварийного обновления.")
+            return True
+
+        if has_base_cookie and sapisid:
+            print_sys("[+] Сессия загружена из файла. Сохраненного токена нет — получаем новый по кукам...")
             token = await get_snlm0e(force_refresh=True)
             if token:
-                print_sys("[+] Отлично! Сессия валидна, доступ к Gemini разрешен.")
+                session_initialized = True
+                print_sys("[+] Отлично! Новый токен получен и сохранен. Доступ к Gemini разрешен.")
                 return True
-            else:
-                print_sys("[!] Текущая сессия больше не подходит. Нужна повторная проверка куков.")
-                return False
+
+            print_sys("[!] Куки найдены, но новый токен по ним получить не удалось.")
+            return False
         else:
             print_sys("[!] Внимание: В файле сессии не найдены нужные куки. Возможно, сессия устарела.")
             return False
@@ -178,7 +282,8 @@ async def keep_alive_worker():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _ = await init_session()
+    if not session_initialized:
+        _ = await init_session()
     task = asyncio.create_task(keep_alive_worker())
     yield
     task.cancel()
@@ -492,7 +597,7 @@ def postprocess_generated_text(generated_text, prefill_text):
     final_text = finalize_thinking_newlines(final_text, close_tag)
     return final_text.rstrip()
 
-async def generate_text_core(request: Request, prompt, model_name="nano-banana-pro", file_content=None):
+async def generate_text_core(request: Request, prompt, model_name="nano-banana-pro", file_content=None, allow_token_refresh_retry=True):
     global CURRENT_MODEL_ID, CACHED_SNLM0E
     
     print_sys("🚀 [ЭТАП 1] Подготовка данных...")
@@ -543,8 +648,12 @@ async def generate_text_core(request: Request, prompt, model_name="nano-banana-p
                 spinner.cancel()
                 print_sys(f"[❌] ОШИБКА GOOGLE API: Сервер вернул статус HTTP {resp.status_code}")
                 if resp.status_code in [400, 401, 403]:
-                    CACHED_SNLM0E = None
-                    print_sys("[*] Кэш токена сброшен. При следующем запросе он будет обновлен.")
+                    invalidate_cached_snlm0e(clear_saved=True)
+                    print_sys("[*] Кэш и сохранение токена сброшены.")
+                    if allow_token_refresh_retry:
+                        refreshed = await refresh_snlm0e_from_cookies("Текстовый запрос")
+                        if refreshed:
+                            return await generate_text_core(request, prompt, model_name=model_name, file_content=file_content, allow_token_refresh_retry=False)
                 return None
                 
             async for line in resp.aiter_lines():
@@ -649,7 +758,7 @@ async def upload_image_to_gemini(image_bytes):
         print_sys(f"[❌] Исключение при загрузке изображения: {e}")
     return None, None, None
 
-async def download_blob_via_batchexecute(snlm0e, blob, chat_id, r_id, rc_id, prompt):
+async def download_blob_via_batchexecute(snlm0e, blob, chat_id, r_id, rc_id, prompt, allow_token_refresh_retry=True):
     url = "https://gemini.google.com/_/BardChatUi/data/batchexecute?rpcids=c8o8Fe&rt=c"
     dummy_id = "r2h8onr2h8onr2h8"
     inner_json = f"""[[[null,null,null,[null,null,null,null,null,{json.dumps(blob)}]],["http://googleusercontent.com/image_generation_content/0",0],null,[19,{json.dumps(prompt)}],null,null,null,null,null,"{dummy_id}"],[{json.dumps(r_id)},{json.dumps(rc_id)},{json.dumps(chat_id)},null,"{dummy_id}"],1,0]"""
@@ -658,6 +767,11 @@ async def download_blob_via_batchexecute(snlm0e, blob, chat_id, r_id, rc_id, pro
         resp = await GLOBAL_CLIENT.post(url, data=req_data, timeout=15.0)
         if resp.status_code != 200:
             print_sys(f"[❌] Ошибка получения blob-картинки: HTTP {resp.status_code}")
+            if resp.status_code in [400, 401, 403] and allow_token_refresh_retry:
+                invalidate_cached_snlm0e(clear_saved=True)
+                refreshed = await refresh_snlm0e_from_cookies("Получение blob-картинки")
+                if refreshed:
+                    return await download_blob_via_batchexecute(refreshed, blob, chat_id, r_id, rc_id, prompt, allow_token_refresh_retry=False)
             return None
         urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', resp.text)
         if urls:
@@ -667,7 +781,7 @@ async def download_blob_via_batchexecute(snlm0e, blob, chat_id, r_id, rc_id, pro
         print_sys(f"[❌] Исключение при получении blob-картинки: {e}")
     return None
 
-async def generate_image_core(request: Request, prompt, reference_images_b64=None, model_name="nano-banana-pro"):
+async def generate_image_core(request: Request, prompt, reference_images_b64=None, model_name="nano-banana-pro", allow_token_refresh_retry=True):
     print_sys(f"\n[*] Старт генерации картинки...")
     image_part = "null"
     if reference_images_b64:
@@ -716,6 +830,11 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
         async with GLOBAL_CLIENT.stream("POST", stream_url, data=req_data, headers=req_headers, timeout=150.0) as resp:
             if resp.status_code != 200:
                 print_sys(f"[❌] ОШИБКА GOOGLE API (Картинки, этап 1): HTTP {resp.status_code}")
+                if resp.status_code in [400, 401, 403] and allow_token_refresh_retry:
+                    invalidate_cached_snlm0e(clear_saved=True)
+                    refreshed = await refresh_snlm0e_from_cookies("Генерация картинки (этап 1)")
+                    if refreshed:
+                        return await generate_image_core(request, prompt, reference_images_b64=reference_images_b64, model_name=model_name, allow_token_refresh_retry=False)
                 return None
             async for line in resp.aiter_lines():
                 if request and await request.is_disconnected():
@@ -750,7 +869,7 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
     
     if urls or blobs:
         print_sys("[+] Картинка успешно сгенерирована на 1 этапе!")
-        final_url = urls[-1] if urls else (await download_blob_via_batchexecute(snlm0e, blobs[-1], chat_id, r_id, rc_id, prompt) if blobs else None)
+        final_url = urls[-1] if urls else (await download_blob_via_batchexecute(snlm0e, blobs[-1], chat_id, r_id, rc_id, prompt, allow_token_refresh_retry=allow_token_refresh_retry) if blobs else None)
     else:
         print_sys("[-] На 1 этапе только текст. Запуск 2 этапа (Redo with Pro)...")
         tokens = re.findall(r'(Aw[A-Za-z0-9_-]{20,}|![A-Za-z0-9_-]{20,})', raw_1)
@@ -773,6 +892,11 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
                 async with GLOBAL_CLIENT.stream("POST", stream_url, data=req_2, headers=req_headers, timeout=150.0) as resp:
                     if resp.status_code != 200:
                         print_sys(f"[❌] ОШИБКА GOOGLE API (Картинки, этап 2): HTTP {resp.status_code}")
+                        if resp.status_code in [400, 401, 403] and allow_token_refresh_retry:
+                            invalidate_cached_snlm0e(clear_saved=True)
+                            refreshed = await refresh_snlm0e_from_cookies("Генерация картинки (этап 2)")
+                            if refreshed:
+                                return await generate_image_core(request, prompt, reference_images_b64=reference_images_b64, model_name=model_name, allow_token_refresh_retry=False)
                         return None
                     async for line in resp.aiter_lines():
                         if request and await request.is_disconnected():
@@ -795,7 +919,7 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
             
             urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', raw_target)
             blobs = re.findall(r'"(\$[A-Za-z0-9+/\-=_]{50,})"', raw_target)
-            final_url = urls[-1] if urls else (await download_blob_via_batchexecute(snlm0e, blobs[-1], chat_id, r_id, rc_id, prompt) if blobs else None)
+            final_url = urls[-1] if urls else (await download_blob_via_batchexecute(snlm0e, blobs[-1], chat_id, r_id, rc_id, prompt, allow_token_refresh_retry=allow_token_refresh_retry) if blobs else None)
     
     if final_url:
         final_url = re.sub(r'=[swh]\d+.*$', '', final_url)
@@ -812,6 +936,98 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
     else:
         print_sys("[❌] Финальный URL картинки не был получен.")
     return None
+
+def is_image_model(model_name):
+    return "nano-banana" in str(model_name or "").lower()
+
+def normalize_requested_model(model_name):
+    normalized = str(model_name or "").lower()
+    if normalized in ["gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3.0-pro-preview"]:
+        return "gemini-3.1-pro-preview"
+    return normalized
+
+def build_chat_history_from_gemini_contents(contents):
+    chat_history = []
+
+    for item in contents:
+        if not isinstance(item, dict):
+            continue
+
+        role = item.get("role", "user")
+        normalized_role = "assistant" if role == "model" else "user"
+        parts = item.get("parts", [])
+        text_parts = []
+
+        if isinstance(parts, list):
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                text = part.get("text")
+                if isinstance(text, str) and text:
+                    text_parts.append(text)
+
+        combined_text = "\n".join(text_parts).strip()
+        if combined_text:
+            chat_history.append({
+                "role": normalized_role,
+                "content": combined_text
+            })
+
+    prefill_text = ""
+    if chat_history and chat_history[-1].get("role") == "assistant":
+        prefill_text = chat_history[-1].get("content", "").strip()
+
+    return chat_history, prefill_text
+
+def has_google_search_tool(data):
+    tools = data.get("tools", []) if isinstance(data, dict) else []
+    if not isinstance(tools, list):
+        return False
+
+    for tool in tools:
+        if isinstance(tool, dict) and isinstance(tool.get("google_search"), dict):
+            return True
+
+    return False
+
+def build_roleplay_safe_prompt(enable_google_search=False):
+    prompt = "Пожалуйста, внимательно прочитай прикрепленный файл chat.json. Это ролевая игра. Ответь на самое последнее сообщение от лица персонажа (Assistant), строго следуя всем правилам и контексту, описанным внутри файла. ВАЖНО: Если в истории задан строгий шаблон для размышлений, ты ОБЯЗАН начать свой ответ с точного копирования и заполнения этого шаблона. Отвечай СТРОГО обычным текстом (plain text) и стандартным Markdown. КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ генерировать интерактивные виджеты, карточки, чипы Google (immersive_entry_chip). Не упоминай сам файл chat.json в ответе."
+
+    if enable_google_search:
+        prompt += " Дополнительно: для этого ответа ОБЯЗАТЕЛЬНО используй встроенный Google-поиск и попробуй найти релевантные детали из содержимого ролевой сцены — например персонажей, локации, музыку, предметы, организации, исторические/культурные отсылки или любые другие сущности, которые могут помочь ответу. Не упоминай отдельно, что ты делал поиск, если это не требуется по контексту; просто тихо используй найденное, когда это реально полезно сцене."
+
+    return prompt
+
+async def handle_gemini_text_generation(request: Request, data, requested_model):
+    contents = data.get("contents", [])
+    if not isinstance(contents, list) or not contents:
+        return JSONResponse({"error": "No contents provided"}, status_code=400)
+
+    chat_history, prefill_text = build_chat_history_from_gemini_contents(contents)
+    if not chat_history:
+        return JSONResponse({"error": "No text content provided"}, status_code=400)
+
+    file_content = json.dumps(chat_history, ensure_ascii=False, indent=2)
+    safe_prompt = build_roleplay_safe_prompt(enable_google_search=has_google_search_tool(data))
+    effective_model = normalize_requested_model(requested_model)
+
+    generated_text = await generate_text_core(request, safe_prompt, model_name=effective_model, file_content=file_content)
+    if generated_text is None:
+        return JSONResponse({"error": {"message": "Failed to generate text. Check server logs for details.", "type": "server_error"}}, status_code=500)
+
+    final_text = postprocess_generated_text(generated_text, prefill_text)
+    return JSONResponse({
+        "candidates": [
+            {
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {"text": final_text}
+                    ]
+                }
+            }
+        ]
+    })
 
 @app.get('/v1/models')
 @app.get('/v1beta/models')
@@ -849,6 +1065,9 @@ async def unified_image_generation(request: Request, model: str = None):
     prompt = data.get('prompt')
     requested_model = data.get('model') or model or "nano-banana-pro"
     reference_images_b64 = []
+
+    if not is_image_model(requested_model):
+        return await handle_gemini_text_generation(request, data, requested_model)
     
     ref_single = data.get('image')
     if ref_single:
@@ -943,9 +1162,10 @@ async def chat_completions(request: Request):
         })
     
     file_content = json.dumps(chat_history, ensure_ascii=False, indent=2)
-    safe_prompt = "Пожалуйста, внимательно прочитай прикрепленный файл chat.json. Это ролевая игра. Ответь на самое последнее сообщение от лица персонажа (Assistant), строго следуя всем правилам и контексту, описанным внутри файла. ВАЖНО: Если в истории задан строгий шаблон для размышлений, ты ОБЯЗАН начать свой ответ с точного копирования и заполнения этого шаблона. Отвечай СТРОГО обычным текстом (plain text) и стандартным Markdown. КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ генерировать интерактивные виджеты, карточки, чипы Google (immersive_entry_chip). Не упоминай сам файл chat.json в ответе."
+    safe_prompt = build_roleplay_safe_prompt()
 
-    requested_model = data.get('model', 'nano-banana-pro').lower()
+    requested_model = str(data.get('model', 'nano-banana-pro')).lower()
+    effective_model = normalize_requested_model(requested_model)
     is_stream = data.get('stream', False)
     
     prefill_text = ""
@@ -959,7 +1179,7 @@ async def chat_completions(request: Request):
             created = int(time.time())
             
             # Запускаем генерацию Гугла в виде фоновой задачи
-            task = asyncio.create_task(generate_text_core(request, safe_prompt, model_name=requested_model, file_content=file_content))
+            task = asyncio.create_task(generate_text_core(request, safe_prompt, model_name=effective_model, file_content=file_content))
             try:
                 # Пока задача не завершена, каждые 10 секунд кидаем пустышку (пульс), чтобы браузер не убил сокет
                 while not task.done():
@@ -1036,7 +1256,7 @@ async def chat_completions(request: Request):
 
     else:
         # Резервный механизм, если стриминг выключен
-        generated_text = await generate_text_core(request, safe_prompt, model_name=requested_model, file_content=file_content)
+        generated_text = await generate_text_core(request, safe_prompt, model_name=effective_model, file_content=file_content)
 
         if generated_text is None:
             print_sys("[❌] ИТОГ: Генерация прервана или завершилась сбоем. Отправляем ошибку в Таверну.")
@@ -1057,9 +1277,16 @@ async def chat_completions(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    session_ok = asyncio.run(init_session())
-    if not session_ok:
-        print_sys("[!] Куки устарели или стали недействительными. Возвращаемся в лаунчер и пробуем один автоматический refresh...")
-        raise SystemExit(SESSION_INVALID_EXIT_CODE)
-    print_sys(f"\n[*] Geminiweb2API запущен! (Порт: {PORT})")
-    uvicorn.run("api:app", host="0.0.0.0", port=PORT, log_level="warning")
+
+    async def run_server():
+        session_ok = await init_session()
+        if not session_ok:
+            print_sys("[!] Куки устарели или стали недействительными. Возвращаемся в лаунчер и пробуем один автоматический refresh...")
+            raise SystemExit(SESSION_INVALID_EXIT_CODE)
+
+        print_sys(f"\n[*] Geminiweb2API запущен! (Порт: {PORT})")
+        config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="warning")
+        server = uvicorn.Server(config)
+        await server.serve()
+
+    asyncio.run(run_server())
