@@ -684,12 +684,30 @@ async def generate_text_core(request: Request, prompt, model_name="nano-banana-p
         
         if not full_text:
             print_sys("[❌] ОШИБКА: Гугл вернул абсолютно пустой текст!")
+            if allow_token_refresh_retry:
+                invalidate_cached_snlm0e(clear_saved=True)
+                print_sys("[*] Пустой ответ считаем подозрением на протухший токен. Сбрасываем токен и пробуем обновить его по кукам...")
+                refreshed = await refresh_snlm0e_from_cookies("Текстовый запрос (пустой ответ)")
+                if refreshed:
+                    return await generate_text_core(request, prompt, model_name=model_name, file_content=file_content, allow_token_refresh_retry=False)
             return None
             
         print_sys(f"[+] Сырой текст успешно извлечен (Длина: {len(full_text)} символов).")
         clean_text = re.sub(r'(?m)^\s*\\\s*$', '', full_text)
         clean_text = clean_text.replace('\\<', '<').replace('\\>', '>').replace('\\/', '/')
-        return clean_text.strip()
+        clean_text = clean_text.strip()
+
+        if not clean_text:
+            print_sys("[❌] ОШИБКА: После очистки ответ от Google оказался пустым!")
+            if allow_token_refresh_retry:
+                invalidate_cached_snlm0e(clear_saved=True)
+                print_sys("[*] Пустой очищенный ответ считаем подозрением на протухший токен. Сбрасываем токен и пробуем обновить его по кукам...")
+                refreshed = await refresh_snlm0e_from_cookies("Текстовый запрос (пустой ответ после очистки)")
+                if refreshed:
+                    return await generate_text_core(request, prompt, model_name=model_name, file_content=file_content, allow_token_refresh_retry=False)
+            return None
+
+        return clean_text
     except asyncio.CancelledError:
         print_sys("🛑 [ОТМЕНЕНО] Генерация текста принудительно остановлена.")
         raise
