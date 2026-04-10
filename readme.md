@@ -372,3 +372,7 @@ python start.py --proxy socks5://ip:port
 
 Возникли проблемы, нашли баг или есть идеи для улучшения?
 Пишите в Telegram: @roflenskoy
+
+---
+
+Current version: 1.1

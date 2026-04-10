@@ -3,12 +3,105 @@ import sys
 import json
 import subprocess
 import shutil
+import urllib.request
+import urllib.error
 
 STATE_FILE = "google_state.json"
 PROFILE_DIR = "chrome_profile"
 SESSION_INVALID_EXIT_CODE = 86
 TOKEN_STATE_KEY = "snlm0e"
 TOKEN_UPDATED_AT_KEY = "snlm0e_updated_at"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+VERSION_FILE = os.path.join(BASE_DIR, "VERSION")
+ONLINE_VERSION_URL = "https://raw.githubusercontent.com/l4ckofsleep/geminiweb2api/main/VERSION"
+ONLINE_RELEASE_URL = "https://api.github.com/repos/l4ckofsleep/geminiweb2api/releases/latest"
+
+def read_local_version():
+    try:
+        with open(VERSION_FILE, "r", encoding="utf-8") as f:
+            version = f.read().strip()
+            return version or "unknown"
+    except Exception:
+        return "unknown"
+
+def parse_version_tuple(version):
+    if not isinstance(version, str):
+        return ()
+
+    normalized = version.strip().lower()
+    if normalized.startswith("v"):
+        normalized = normalized[1:]
+
+    parts = []
+    for chunk in normalized.split("."):
+        digits = ""
+        for char in chunk:
+            if char.isdigit():
+                digits += char
+            else:
+                break
+        if not digits:
+            return ()
+        parts.append(int(digits))
+
+    return tuple(parts)
+
+def fetch_text(url, timeout=2.0):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "geminiweb2api-version-check/1.0",
+            "Accept": "application/json, text/plain, */*",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+def fetch_online_version():
+    try:
+        version_text = fetch_text(ONLINE_VERSION_URL).strip()
+        if version_text:
+            return version_text
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            return None
+    except Exception:
+        return None
+
+    try:
+        release_payload = json.loads(fetch_text(ONLINE_RELEASE_URL))
+    except urllib.error.HTTPError:
+        return None
+    except Exception:
+        return None
+
+    if not isinstance(release_payload, dict):
+        return None
+
+    for key in ["tag_name", "name"]:
+        value = release_payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return None
+
+def print_version_mismatch_notice(local_version):
+    online_version = fetch_online_version()
+    if not online_version or local_version == "unknown":
+        return
+
+    local_tuple = parse_version_tuple(local_version)
+    online_tuple = parse_version_tuple(online_version)
+
+    if local_tuple and online_tuple:
+        if local_tuple < online_tuple:
+            print(f"[!] Доступна новая версия: {online_version} (у вас {local_version})")
+        elif local_tuple > online_tuple:
+            print(f"[*] Локальная версия новее онлайн-репозитория: {local_version} > {online_version}")
+        return
+
+    if local_version != online_version:
+        print(f"[!] Версия отличается от онлайн-репозитория: локальная {local_version}, онлайн {online_version}")
 
 def load_existing_token_state():
     if not os.path.exists(STATE_FILE):
@@ -93,9 +186,11 @@ def run_api(extra_args):
     return subprocess.run(args)
 
 def main():
+    local_version = read_local_version()
     print("=" * 40)
-    print("🍌 Geminiweb2api")
+    print(f"🍌 Geminiweb2api v{local_version}")
     print("=" * 40)
+    print_version_mismatch_notice(local_version)
 
     extra_api_args = []
     proxy_url = None
