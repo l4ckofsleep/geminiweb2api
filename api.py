@@ -490,6 +490,48 @@ def is_garbage_node(text):
         if text.startswith(prefix): return True
     return False
 
+def is_internal_google_think_block(think_block, tag_name):
+    if not isinstance(think_block, str) or not think_block.strip():
+        return False
+
+    open_tag = f"<{tag_name}>"
+    close_tag = f"</{tag_name}>"
+    think_content = think_block.strip()
+
+    if think_content.startswith(open_tag) and think_content.endswith(close_tag):
+        think_content = think_content[len(open_tag):-len(close_tag)]
+
+    return starts_with_internal_google_thinking(think_content)
+
+def starts_with_internal_google_thinking(text):
+    if not isinstance(text, str) or not text.strip():
+        return False
+
+    first_nonempty_line = ""
+    for line in text.splitlines():
+        stripped_line = line.strip()
+        if stripped_line:
+            first_nonempty_line = stripped_line
+            break
+
+    if not first_nonempty_line:
+        return False
+
+    garbage_prefixes = [
+        "Constructing the Scene", "Analyzing Scene Flow", "Composing Sensory Details",
+        "Validating Output Criteria", "Refining Character Response", "Observing Seraphim",
+        "Verifying Formatting", "Assessing Tactical", "Composing the Scene",
+        "Refining the Output", "Finalizing the Scene", "Expanding the Scene",
+        "Evaluating the Narrative", "Assessing the Reaction", "Composing the Response",
+        "Refining the Russian", "Defining the Objective"
+    ]
+
+    for prefix in garbage_prefixes:
+        if first_nonempty_line.startswith(prefix):
+            return True
+
+    return False
+
 def find_actual_response(obj):
     longest = ""
     if isinstance(obj, str):
@@ -610,6 +652,37 @@ def format_think_block(think_block, tag_name, is_valid_block):
 
     return f"{open_tag}\n{think_content}\n{close_tag}"
 
+def strip_leading_internal_google_think_blocks(text, tag_name):
+    if not isinstance(text, str) or not text:
+        return ""
+
+    remaining_text = text
+
+    while True:
+        think_block, body_text, _ = extract_leading_think_block(remaining_text, tag_name)
+        if not think_block:
+            return remaining_text
+
+        if not is_internal_google_think_block(think_block, tag_name):
+            return remaining_text
+
+        remaining_text = body_text.lstrip('\n\r \t')
+
+def strip_leading_internal_google_prefill_think_content(text, tag_name):
+    if not isinstance(text, str) or not text:
+        return ""
+
+    close_tag = f"</{tag_name}>"
+    close_tag_index = text.find(close_tag)
+    if close_tag_index < 0:
+        return text
+
+    think_content = text[:close_tag_index]
+    if not starts_with_internal_google_thinking(think_content):
+        return text
+
+    return text[close_tag_index + len(close_tag):].lstrip('\n\r \t')
+
 def normalize_infoblock_html(infoblock_html):
     if not infoblock_html:
         return ""
@@ -648,12 +721,17 @@ def normalize_infoblock_html(infoblock_html):
 def postprocess_generated_text(generated_text, prefill_text):
     generated_text = strip_google_leading_garbage(generated_text)
     tag_name = choose_thinking_tag(prefill_text, generated_text)
+    open_tag = f"<{tag_name}>"
     close_tag = f"</{tag_name}>"
 
     final_text = normalize_thinking_tags(generated_text, tag_name)
     normalized_prefill = normalize_thinking_tags(prefill_text, tag_name).strip()
     preserve_prefill_newline = normalized_prefill.endswith('>')
+    prefill_opens_think_block = normalized_prefill.endswith(open_tag)
     final_text = trim_prefill_echo(final_text, normalized_prefill)
+    if prefill_opens_think_block:
+        final_text = strip_leading_internal_google_prefill_think_content(final_text, tag_name)
+    final_text = strip_leading_internal_google_think_blocks(final_text, tag_name)
 
     main_text, infoblock_html = split_infoblock_suffix(final_text)
     think_block, body_text, is_valid_think_block = extract_leading_think_block(main_text, tag_name)
