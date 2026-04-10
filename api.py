@@ -18,6 +18,11 @@ import random
 # Парсинг аргументов
 IS_TEMP_CHAT = "--temp" in sys.argv
 IS_DEBUG = "--debug" in sys.argv
+IS_MOBILE = (
+    'com.termux' in os.environ.get('PREFIX', '')
+    or 'ANDROID_STORAGE' in os.environ
+    or hasattr(sys, 'getandroidapilevel')
+)
 
 PROXY_URL = None
 if "--proxy" in sys.argv:
@@ -959,7 +964,15 @@ def is_image_model(model_name):
     return "nano-banana" in str(model_name or "").lower()
 
 def normalize_requested_model(model_name):
-    normalized = str(model_name or "").lower()
+    normalized = str(model_name or "").strip().lower()
+
+    if normalized.startswith("/v1beta/models/"):
+        normalized = normalized[len("/v1beta/models/"):]
+    if normalized.startswith("models/"):
+        normalized = normalized[len("models/"):]
+    if ":" in normalized:
+        normalized = normalized.split(":", 1)[0]
+
     if normalized in ["gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3.0-pro-preview"]:
         return "gemini-3.1-pro-preview"
     if normalized == "gemini-3-flash-preview":
@@ -1083,11 +1096,18 @@ async def unified_image_generation(request: Request, model: str = None):
     
     is_gemini_format = False
     prompt = data.get('prompt')
-    requested_model = data.get('model') or model or "nano-banana-pro"
+    body_model = data.get('model')
+    requested_model = body_model or model or "nano-banana-pro"
+    effective_model = normalize_requested_model(requested_model)
     reference_images_b64 = []
 
-    if not is_image_model(requested_model):
-        return await handle_gemini_text_generation(request, data, requested_model)
+    if request.url.path.startswith('/v1beta/models/'):
+        print_sys(
+            f"[*] Gemini-compatible request: path model={model!r}, body model={body_model!r}, requested={requested_model!r}, effective={effective_model!r}"
+        )
+
+    if not is_image_model(effective_model):
+        return await handle_gemini_text_generation(request, data, effective_model)
     
     ref_single = data.get('image')
     if ref_single:
@@ -1131,7 +1151,7 @@ async def unified_image_generation(request: Request, model: str = None):
     if format_instructions:
         prompt = f"[SYSTEM INSTRUCTION: MUST USE FORMAT - {', '.join(format_instructions)}] {prompt}"
 
-    image_path = await generate_image_core(request, prompt, reference_images_b64=reference_images_b64, model_name=requested_model)
+    image_path = await generate_image_core(request, prompt, reference_images_b64=reference_images_b64, model_name=effective_model)
     
     if not image_path:
         return JSONResponse({"error": "Failed to generate image. Check server logs for details."}, status_code=500)
@@ -1301,6 +1321,10 @@ if __name__ == "__main__":
     async def run_server():
         session_ok = await init_session()
         if not session_ok:
+            if IS_MOBILE:
+                print_sys("[❌] Не удалось ни использовать токен, ни получить новый по кукам. На телефоне авто-refresh невозможен. Либо упали Google, либо VPN не подходит, либо нужно заново снять куки.")
+                raise SystemExit(1)
+
             print_sys("[!] Куки устарели или стали недействительными. Возвращаемся в лаунчер и пробуем один автоматический refresh...")
             raise SystemExit(SESSION_INVALID_EXIT_CODE)
 

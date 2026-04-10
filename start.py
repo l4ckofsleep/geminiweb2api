@@ -7,6 +7,26 @@ import shutil
 STATE_FILE = "google_state.json"
 PROFILE_DIR = "chrome_profile"
 SESSION_INVALID_EXIT_CODE = 86
+TOKEN_STATE_KEY = "snlm0e"
+TOKEN_UPDATED_AT_KEY = "snlm0e_updated_at"
+
+def load_existing_token_state():
+    if not os.path.exists(STATE_FILE):
+        return {}
+
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        if not isinstance(state, dict):
+            return {}
+    except Exception:
+        return {}
+
+    preserved = {}
+    for key in [TOKEN_STATE_KEY, TOKEN_UPDATED_AT_KEY]:
+        if key in state:
+            preserved[key] = state[key]
+    return preserved
 
 def is_mobile():
     if 'com.termux' in os.environ.get('PREFIX', ''): return True
@@ -43,6 +63,7 @@ def run_auth_mobile():
             {"name": "SAPISID", "value": sapisid, "domain": ".google.com"}
         ]
     }
+    state.update(load_existing_token_state())
 
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f)

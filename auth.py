@@ -2,6 +2,29 @@ from playwright.sync_api import sync_playwright
 import time
 import os
 import sys
+import json
+
+STATE_FILE = "google_state.json"
+TOKEN_STATE_KEY = "snlm0e"
+TOKEN_UPDATED_AT_KEY = "snlm0e_updated_at"
+
+def load_existing_token_state():
+    if not os.path.exists(STATE_FILE):
+        return {}
+
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        if not isinstance(state, dict):
+            return {}
+    except Exception:
+        return {}
+
+    preserved = {}
+    for key in [TOKEN_STATE_KEY, TOKEN_UPDATED_AT_KEY]:
+        if key in state:
+            preserved[key] = state[key]
+    return preserved
 
 def login_and_save_state():
     print("\n[*] Инициализация браузера для входа...")
@@ -83,7 +106,14 @@ def login_and_save_state():
                 
             page.wait_for_timeout(4000) 
 
-        context.storage_state(path="google_state.json")
+        state = context.storage_state()
+        if not isinstance(state, dict):
+            state = {}
+        state.update(load_existing_token_state())
+
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+
         print("\n[+] УСПЕХ! Сессия надежно сохранена в 'google_state.json'.")
         
         context.close()
