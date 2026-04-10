@@ -149,6 +149,86 @@ async def refresh_snlm0e_from_cookies(reason):
     print_sys("[!] Обновить токен по кукам не удалось.")
     return None
 
+def print_final_session_failure(reason):
+    if IS_MOBILE:
+        print_sys(f"[❌] {reason}: не удалось использовать токен и получить новый по кукам. На телефоне авто-refresh невозможен. Возможно, Google сейчас лежит, VPN не подходит или нужно заново снять куки.")
+        return
+
+    print_sys(f"[❌] {reason}: не удалось использовать токен, получить новый по кукам, и автоматический refresh тоже не помог. Возможно, Google сейчас лежит, VPN не подходит, куки нужно сбросить или запустить start.py --reauth.")
+
+async def run_desktop_auto_refresh(reason):
+    if IS_MOBILE:
+        return False
+
+    print_sys(f"[!] {reason}: токен не удалось восстановить по кукам. Пробуем один автоматический refresh на ПК...")
+    if os.path.exists(STATE_FILE):
+        os.remove(STATE_FILE)
+        print_sys(f"[*] Старый файл {STATE_FILE} удален перед авто-refresh.")
+
+    auth_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auth.py")
+    args = [sys.executable, auth_script]
+    if PROXY_URL:
+        args.extend(["--proxy", PROXY_URL])
+
+    try:
+        process = await asyncio.create_subprocess_exec(*args)
+        returncode = await process.wait()
+    except Exception as e:
+        print_sys(f"[❌] Не удалось запустить авто-refresh: {e}")
+        return False
+
+    if returncode != 0 or not os.path.exists(STATE_FILE):
+        print_sys("[!] Автоматический refresh не смог сохранить новую сессию.")
+        return False
+
+    print_sys("[*] Автоматический refresh завершен. Переинициализируем сессию...")
+    session_ok = await init_session()
+    if session_ok:
+        print_sys("[+] Сессия успешно восстановлена после авто-refresh.")
+        return True
+
+    print_sys("[!] После авто-refresh сессию восстановить не удалось.")
+    return False
+
+async def get_or_recover_request_snlm0e(reason, allow_token_refresh_retry=True, allow_desktop_refresh_retry=True):
+    token = await get_snlm0e()
+    if token:
+        return token, allow_token_refresh_retry, allow_desktop_refresh_retry
+
+    if allow_token_refresh_retry:
+        refreshed = await refresh_snlm0e_from_cookies(f"{reason} (токен не найден)")
+        if refreshed:
+            return refreshed, False, allow_desktop_refresh_retry
+
+    if allow_desktop_refresh_retry and not IS_MOBILE:
+        refreshed_session = await run_desktop_auto_refresh(f"{reason} (токен не найден)")
+        if refreshed_session:
+            token = await get_snlm0e()
+            if token:
+                return token, False, False
+
+    print_final_session_failure(reason)
+    return None, False, False
+
+async def recover_request_snlm0e(reason, allow_token_refresh_retry=True, allow_desktop_refresh_retry=True):
+    invalidate_cached_snlm0e(clear_saved=True)
+    print_sys("[*] Кэш и сохранение токена сброшены.")
+
+    if allow_token_refresh_retry:
+        refreshed = await refresh_snlm0e_from_cookies(reason)
+        if refreshed:
+            return refreshed, False, allow_desktop_refresh_retry
+
+    if allow_desktop_refresh_retry and not IS_MOBILE:
+        refreshed_session = await run_desktop_auto_refresh(reason)
+        if refreshed_session:
+            token = await get_snlm0e()
+            if token:
+                return token, False, False
+
+    print_final_session_failure(reason)
+    return None, False, False
+
 def print_sys(msg):
     """Кастомный принт: пишет в консоль (затирая крутилку) и сохраняет в logs.txt"""
     t = time.strftime("%H:%M:%S")
@@ -189,6 +269,7 @@ async def get_snlm0e(force_refresh=False):
             CACHED_SNLM0E = saved_token
             if IS_DEBUG: print_sys("[DEBUG] Загружен сохраненный токен SNlM0e из google_state.json.")
             return CACHED_SNLM0E
+        return None
         
     if IS_DEBUG: print_sys("[DEBUG] Скачивание главной страницы для получения токена SNlM0e...")
     try:
@@ -602,7 +683,7 @@ def postprocess_generated_text(generated_text, prefill_text):
     final_text = finalize_thinking_newlines(final_text, close_tag)
     return final_text.rstrip()
 
-async def generate_text_core(request: Request, prompt, model_name="nano-banana-pro", file_content=None, allow_token_refresh_retry=True):
+async def generate_text_core(request: Request, prompt, model_name="nano-banana-pro", file_content=None, allow_token_refresh_retry=True, allow_desktop_refresh_retry=True):
     global CURRENT_MODEL_ID, CACHED_SNLM0E
     
     print_sys("🚀 [ЭТАП 1] Подготовка данных...")
@@ -613,7 +694,11 @@ async def generate_text_core(request: Request, prompt, model_name="nano-banana-p
         else: print_sys("⚠️ Предупреждение: Не удалось прикрепить историю (chat.json). Генерация продолжится без неё.")
 
     print_sys("🔑 [ЭТАП 2] Проверка токена и настройка модели...")
-    snlm0e = await get_snlm0e()
+    snlm0e, allow_token_refresh_retry, allow_desktop_refresh_retry = await get_or_recover_request_snlm0e(
+        "Текстовый запрос",
+        allow_token_refresh_retry=allow_token_refresh_retry,
+        allow_desktop_refresh_retry=allow_desktop_refresh_retry,
+    )
     if not snlm0e: 
         return None
 
@@ -653,12 +738,20 @@ async def generate_text_core(request: Request, prompt, model_name="nano-banana-p
                 spinner.cancel()
                 print_sys(f"[❌] ОШИБКА GOOGLE API: Сервер вернул статус HTTP {resp.status_code}")
                 if resp.status_code in [400, 401, 403]:
-                    invalidate_cached_snlm0e(clear_saved=True)
-                    print_sys("[*] Кэш и сохранение токена сброшены.")
-                    if allow_token_refresh_retry:
-                        refreshed = await refresh_snlm0e_from_cookies("Текстовый запрос")
-                        if refreshed:
-                            return await generate_text_core(request, prompt, model_name=model_name, file_content=file_content, allow_token_refresh_retry=False)
+                    recovered, next_token_retry, next_desktop_refresh_retry = await recover_request_snlm0e(
+                        "Текстовый запрос",
+                        allow_token_refresh_retry=allow_token_refresh_retry,
+                        allow_desktop_refresh_retry=allow_desktop_refresh_retry,
+                    )
+                    if recovered:
+                        return await generate_text_core(
+                            request,
+                            prompt,
+                            model_name=model_name,
+                            file_content=file_content,
+                            allow_token_refresh_retry=next_token_retry,
+                            allow_desktop_refresh_retry=next_desktop_refresh_retry,
+                        )
                 return None
                 
             async for line in resp.aiter_lines():
@@ -689,12 +782,20 @@ async def generate_text_core(request: Request, prompt, model_name="nano-banana-p
         
         if not full_text:
             print_sys("[❌] ОШИБКА: Гугл вернул абсолютно пустой текст!")
-            if allow_token_refresh_retry:
-                invalidate_cached_snlm0e(clear_saved=True)
-                print_sys("[*] Пустой ответ считаем подозрением на протухший токен. Сбрасываем токен и пробуем обновить его по кукам...")
-                refreshed = await refresh_snlm0e_from_cookies("Текстовый запрос (пустой ответ)")
-                if refreshed:
-                    return await generate_text_core(request, prompt, model_name=model_name, file_content=file_content, allow_token_refresh_retry=False)
+            recovered, next_token_retry, next_desktop_refresh_retry = await recover_request_snlm0e(
+                "Текстовый запрос (пустой ответ)",
+                allow_token_refresh_retry=allow_token_refresh_retry,
+                allow_desktop_refresh_retry=allow_desktop_refresh_retry,
+            )
+            if recovered:
+                return await generate_text_core(
+                    request,
+                    prompt,
+                    model_name=model_name,
+                    file_content=file_content,
+                    allow_token_refresh_retry=next_token_retry,
+                    allow_desktop_refresh_retry=next_desktop_refresh_retry,
+                )
             return None
             
         print_sys(f"[+] Сырой текст успешно извлечен (Длина: {len(full_text)} символов).")
@@ -704,12 +805,20 @@ async def generate_text_core(request: Request, prompt, model_name="nano-banana-p
 
         if not clean_text:
             print_sys("[❌] ОШИБКА: После очистки ответ от Google оказался пустым!")
-            if allow_token_refresh_retry:
-                invalidate_cached_snlm0e(clear_saved=True)
-                print_sys("[*] Пустой очищенный ответ считаем подозрением на протухший токен. Сбрасываем токен и пробуем обновить его по кукам...")
-                refreshed = await refresh_snlm0e_from_cookies("Текстовый запрос (пустой ответ после очистки)")
-                if refreshed:
-                    return await generate_text_core(request, prompt, model_name=model_name, file_content=file_content, allow_token_refresh_retry=False)
+            recovered, next_token_retry, next_desktop_refresh_retry = await recover_request_snlm0e(
+                "Текстовый запрос (пустой ответ после очистки)",
+                allow_token_refresh_retry=allow_token_refresh_retry,
+                allow_desktop_refresh_retry=allow_desktop_refresh_retry,
+            )
+            if recovered:
+                return await generate_text_core(
+                    request,
+                    prompt,
+                    model_name=model_name,
+                    file_content=file_content,
+                    allow_token_refresh_retry=next_token_retry,
+                    allow_desktop_refresh_retry=next_desktop_refresh_retry,
+                )
             return None
 
         return clean_text
@@ -781,7 +890,7 @@ async def upload_image_to_gemini(image_bytes):
         print_sys(f"[❌] Исключение при загрузке изображения: {e}")
     return None, None, None
 
-async def download_blob_via_batchexecute(snlm0e, blob, chat_id, r_id, rc_id, prompt, allow_token_refresh_retry=True):
+async def download_blob_via_batchexecute(snlm0e, blob, chat_id, r_id, rc_id, prompt, allow_token_refresh_retry=True, allow_desktop_refresh_retry=True):
     url = "https://gemini.google.com/_/BardChatUi/data/batchexecute?rpcids=c8o8Fe&rt=c"
     dummy_id = "r2h8onr2h8onr2h8"
     inner_json = f"""[[[null,null,null,[null,null,null,null,null,{json.dumps(blob)}]],["http://googleusercontent.com/image_generation_content/0",0],null,[19,{json.dumps(prompt)}],null,null,null,null,null,"{dummy_id}"],[{json.dumps(r_id)},{json.dumps(rc_id)},{json.dumps(chat_id)},null,"{dummy_id}"],1,0]"""
@@ -790,11 +899,23 @@ async def download_blob_via_batchexecute(snlm0e, blob, chat_id, r_id, rc_id, pro
         resp = await GLOBAL_CLIENT.post(url, data=req_data, timeout=15.0)
         if resp.status_code != 200:
             print_sys(f"[❌] Ошибка получения blob-картинки: HTTP {resp.status_code}")
-            if resp.status_code in [400, 401, 403] and allow_token_refresh_retry:
-                invalidate_cached_snlm0e(clear_saved=True)
-                refreshed = await refresh_snlm0e_from_cookies("Получение blob-картинки")
-                if refreshed:
-                    return await download_blob_via_batchexecute(refreshed, blob, chat_id, r_id, rc_id, prompt, allow_token_refresh_retry=False)
+            if resp.status_code in [400, 401, 403]:
+                recovered, next_token_retry, next_desktop_refresh_retry = await recover_request_snlm0e(
+                    "Получение blob-картинки",
+                    allow_token_refresh_retry=allow_token_refresh_retry,
+                    allow_desktop_refresh_retry=allow_desktop_refresh_retry,
+                )
+                if recovered:
+                    return await download_blob_via_batchexecute(
+                        recovered,
+                        blob,
+                        chat_id,
+                        r_id,
+                        rc_id,
+                        prompt,
+                        allow_token_refresh_retry=next_token_retry,
+                        allow_desktop_refresh_retry=next_desktop_refresh_retry,
+                    )
             return None
         urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', resp.text)
         if urls:
@@ -804,7 +925,7 @@ async def download_blob_via_batchexecute(snlm0e, blob, chat_id, r_id, rc_id, pro
         print_sys(f"[❌] Исключение при получении blob-картинки: {e}")
     return None
 
-async def generate_image_core(request: Request, prompt, reference_images_b64=None, model_name="nano-banana-pro", allow_token_refresh_retry=True):
+async def generate_image_core(request: Request, prompt, reference_images_b64=None, model_name="nano-banana-pro", allow_token_refresh_retry=True, allow_desktop_refresh_retry=True):
     print_sys(f"\n[*] Старт генерации картинки...")
     image_part = "null"
     if reference_images_b64:
@@ -823,7 +944,11 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
                 images_json_list.append(f'[[{json.dumps(ref_id)},1,null,{json.dumps(mime_type)}],"reference_{i}.{ext}"]')
             image_part = "[" + ",".join(images_json_list) + "]"
 
-    snlm0e = await get_snlm0e()
+    snlm0e, allow_token_refresh_retry, allow_desktop_refresh_retry = await get_or_recover_request_snlm0e(
+        "Генерация картинки",
+        allow_token_refresh_retry=allow_token_refresh_retry,
+        allow_desktop_refresh_retry=allow_desktop_refresh_retry,
+    )
     if not snlm0e: return None
 
     stream_url = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?rt=c"
@@ -853,11 +978,21 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
         async with GLOBAL_CLIENT.stream("POST", stream_url, data=req_data, headers=req_headers, timeout=150.0) as resp:
             if resp.status_code != 200:
                 print_sys(f"[❌] ОШИБКА GOOGLE API (Картинки, этап 1): HTTP {resp.status_code}")
-                if resp.status_code in [400, 401, 403] and allow_token_refresh_retry:
-                    invalidate_cached_snlm0e(clear_saved=True)
-                    refreshed = await refresh_snlm0e_from_cookies("Генерация картинки (этап 1)")
-                    if refreshed:
-                        return await generate_image_core(request, prompt, reference_images_b64=reference_images_b64, model_name=model_name, allow_token_refresh_retry=False)
+                if resp.status_code in [400, 401, 403]:
+                    recovered, next_token_retry, next_desktop_refresh_retry = await recover_request_snlm0e(
+                        "Генерация картинки (этап 1)",
+                        allow_token_refresh_retry=allow_token_refresh_retry,
+                        allow_desktop_refresh_retry=allow_desktop_refresh_retry,
+                    )
+                    if recovered:
+                        return await generate_image_core(
+                            request,
+                            prompt,
+                            reference_images_b64=reference_images_b64,
+                            model_name=model_name,
+                            allow_token_refresh_retry=next_token_retry,
+                            allow_desktop_refresh_retry=next_desktop_refresh_retry,
+                        )
                 return None
             async for line in resp.aiter_lines():
                 if request and await request.is_disconnected():
@@ -892,7 +1027,7 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
     
     if urls or blobs:
         print_sys("[+] Картинка успешно сгенерирована на 1 этапе!")
-        final_url = urls[-1] if urls else (await download_blob_via_batchexecute(snlm0e, blobs[-1], chat_id, r_id, rc_id, prompt, allow_token_refresh_retry=allow_token_refresh_retry) if blobs else None)
+        final_url = urls[-1] if urls else (await download_blob_via_batchexecute(snlm0e, blobs[-1], chat_id, r_id, rc_id, prompt, allow_token_refresh_retry=allow_token_refresh_retry, allow_desktop_refresh_retry=allow_desktop_refresh_retry) if blobs else None)
     else:
         print_sys("[-] На 1 этапе только текст. Запуск 2 этапа (Redo with Pro)...")
         tokens = re.findall(r'(Aw[A-Za-z0-9_-]{20,}|![A-Za-z0-9_-]{20,})', raw_1)
@@ -915,11 +1050,21 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
                 async with GLOBAL_CLIENT.stream("POST", stream_url, data=req_2, headers=req_headers, timeout=150.0) as resp:
                     if resp.status_code != 200:
                         print_sys(f"[❌] ОШИБКА GOOGLE API (Картинки, этап 2): HTTP {resp.status_code}")
-                        if resp.status_code in [400, 401, 403] and allow_token_refresh_retry:
-                            invalidate_cached_snlm0e(clear_saved=True)
-                            refreshed = await refresh_snlm0e_from_cookies("Генерация картинки (этап 2)")
-                            if refreshed:
-                                return await generate_image_core(request, prompt, reference_images_b64=reference_images_b64, model_name=model_name, allow_token_refresh_retry=False)
+                        if resp.status_code in [400, 401, 403]:
+                            recovered, next_token_retry, next_desktop_refresh_retry = await recover_request_snlm0e(
+                                "Генерация картинки (этап 2)",
+                                allow_token_refresh_retry=allow_token_refresh_retry,
+                                allow_desktop_refresh_retry=allow_desktop_refresh_retry,
+                            )
+                            if recovered:
+                                return await generate_image_core(
+                                    request,
+                                    prompt,
+                                    reference_images_b64=reference_images_b64,
+                                    model_name=model_name,
+                                    allow_token_refresh_retry=next_token_retry,
+                                    allow_desktop_refresh_retry=next_desktop_refresh_retry,
+                                )
                         return None
                     async for line in resp.aiter_lines():
                         if request and await request.is_disconnected():
@@ -942,7 +1087,7 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
             
             urls = re.findall(r'(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_/\-\=]+)', raw_target)
             blobs = re.findall(r'"(\$[A-Za-z0-9+/\-=_]{50,})"', raw_target)
-            final_url = urls[-1] if urls else (await download_blob_via_batchexecute(snlm0e, blobs[-1], chat_id, r_id, rc_id, prompt, allow_token_refresh_retry=allow_token_refresh_retry) if blobs else None)
+            final_url = urls[-1] if urls else (await download_blob_via_batchexecute(snlm0e, blobs[-1], chat_id, r_id, rc_id, prompt, allow_token_refresh_retry=allow_token_refresh_retry, allow_desktop_refresh_retry=allow_desktop_refresh_retry) if blobs else None)
     
     if final_url:
         final_url = re.sub(r'=[swh]\d+.*$', '', final_url)

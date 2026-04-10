@@ -157,15 +157,15 @@ def main():
             refresh_result = run_auto_refresh_pc(proxy_url)
             if refresh_result.returncode != 0 or not os.path.exists(STATE_FILE):
                 print("\n[❌] Не удалось автоматически обновить сессию.")
-                print("[!] Проверь, что Gemini открывается в браузере и аккаунт там все еще авторизован.")
-                print("[!] Если не поможет, запусти start.py --reauth и войди заново.")
+                print("[!] Возможно, Google сейчас лежит, VPN не подходит, аккаунт разлогинен или куки уже окончательно умерли.")
+                print("[!] Проверь, что Gemini открывается в браузере, попробуй сменить VPN или запусти start.py --reauth и войди заново.")
                 sys.exit(1)
 
             api_result = run_api(extra_api_args)
             if api_result.returncode == SESSION_INVALID_EXIT_CODE:
                 print("\n[❌] Мы один раз обновили сессию, но Google всё равно не принял новые куки.")
-                print("[!] Скорее всего, аккаунт разлогинен в браузере или сессия уже окончательно протухла.")
-                print("[!] Запусти start.py --reauth и пройди вход заново.")
+                print("[!] Возможно, Google сейчас лежит, VPN не подходит, аккаунт разлогинен или куки уже окончательно протухли.")
+                print("[!] Попробуй сменить VPN или запусти start.py --reauth и пройди вход заново.")
                 sys.exit(1)
 
             if api_result.returncode != 0:
