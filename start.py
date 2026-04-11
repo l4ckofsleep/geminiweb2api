@@ -125,19 +125,34 @@ def is_mobile():
     if 'com.termux' in os.environ.get('PREFIX', ''): return True
     if 'ANDROID_STORAGE' in os.environ: return True
     if hasattr(sys, 'getandroidapilevel'): return True
+    if sys.platform.startswith('linux'): return True
     return False
 
 def run_auth_mobile():
+    is_linux = sys.platform.startswith('linux') and not hasattr(sys, 'getandroidapilevel') and 'ANDROID_STORAGE' not in os.environ
     print("\n" + "="*50)
-    print("📱 ОБНАРУЖЕНО МОБИЛЬНОЕ УСТРОЙСТВО (Android/Termux)")
+    if is_linux:
+        print("🐧 ОБНАРУЖЕН LINUX. Включаем ручную авторизацию по кукам.")
+    else:
+        print("📱 ОБНАРУЖЕНО МОБИЛЬНОЕ УСТРОЙСТВО (Android/Termux)")
     print("="*50)
-    print("Из-за защиты Android скрипт не может сам достать куки.")
-    print("Тебе нужно сделать это один раз вручную:")
-    print("1. Установи Kiwi Browser или Firefox из Google Play.")
-    print("2. Установи расширение 'Cookie-Editor' через меню дополнений.")
-    print("3. Зайди на gemini.google.com и залогинься.")
-    print("4. ⚡ ВАЖНО: Открой меню браузера (три точки) и включи 'Версия для ПК' (Desktop site)!")
-    print("5. Дождись перезагрузки страницы, открой Cookie-Editor и скопируй ДВА кука:")
+    if is_linux:
+        print("На Linux Playwright-авторизация может не работать или блокироваться Google как небезопасный браузер.")
+        print("Поэтому здесь используем ручной вход по кукам.")
+        print("Тебе нужно сделать это один раз вручную:")
+        print("1. Открой Firefox / Chrome / другой обычный браузер.")
+        print("2. Установи расширение 'Cookie-Editor' (или аналог для просмотра куков).")
+        print("3. Зайди на gemini.google.com и залогинься.")
+        print("4. Если Gemini не открывается без desktop-режима сайта, включи его в браузере.")
+        print("5. Открой менеджер куков и скопируй ДВА кука:")
+    else:
+        print("Из-за защиты Android скрипт не может сам достать куки.")
+        print("Тебе нужно сделать это один раз вручную:")
+        print("1. Установи Kiwi Browser или Firefox из Google Play.")
+        print("2. Установи расширение 'Cookie-Editor' через меню дополнений.")
+        print("3. Зайди на gemini.google.com и залогинься.")
+        print("4. ⚡ ВАЖНО: Открой меню браузера (три точки) и включи 'Версия для ПК' (Desktop site)!")
+        print("5. Дождись перезагрузки страницы, открой Cookie-Editor и скопируй ДВА кука:")
     print("   __Secure-1PSID и SAPISID.")
     print("-" * 50)
     print("💡 Если какого-то кука все равно нет, попробуй отправить боту любое сообщение и проверить снова.")
