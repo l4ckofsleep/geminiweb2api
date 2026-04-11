@@ -19,6 +19,8 @@ import random
 IS_TEMP_CHAT = "--temp" in sys.argv
 IS_DEBUG = "--debug" in sys.argv
 IS_MOBILE = (
+    "--mobile" in sys.argv
+    or
     'com.termux' in os.environ.get('PREFIX', '')
     or 'ANDROID_STORAGE' in os.environ
     or hasattr(sys, 'getandroidapilevel')
@@ -151,7 +153,7 @@ async def refresh_snlm0e_from_cookies(reason):
 
 def print_final_session_failure(reason):
     if IS_MOBILE:
-        print_sys(f"[❌] {reason}: не удалось использовать токен и получить новый по кукам. На телефоне авто-refresh невозможен. Возможно, Google сейчас лежит, VPN не подходит или нужно заново снять куки.")
+        print_sys(f"[❌] {reason}: не удалось использовать токен и получить новый по кукам. На телефоне авто-refresh невозможен. Запусти start.py --reauth и войди заново. Если не поможет, проверь VPN и доступность Gemini.")
         return
 
     print_sys(f"[❌] {reason}: не удалось использовать токен, получить новый по кукам, и автоматический refresh тоже не помог. Возможно, Google сейчас лежит, VPN не подходит, куки нужно сбросить или запустить start.py --reauth.")
@@ -360,7 +362,18 @@ async def keep_alive_worker():
             if token:
                 if IS_DEBUG: print_sys("[DEBUG] Keep-alive: Сессия активна.")
             else:
-                print_sys("[!] Keep-alive: Сессия убита Гуглом. Сделай --refresh.")
+                if IS_MOBILE:
+                    print_sys("[!] Keep-alive: Сессия убита Гуглом. На телефоне запусти start.py --reauth и войди заново.")
+                    continue
+
+                refreshed_session = await run_desktop_auto_refresh("Keep-alive")
+                if refreshed_session:
+                    restored_token = await get_snlm0e()
+                    if restored_token:
+                        print_sys("[+] Keep-alive: Сессия успешно восстановлена автоматическим refresh.")
+                        continue
+
+                print_sys("[!] Keep-alive: Автоматический refresh не помог. Запусти start.py --reauth и войди заново.")
         except asyncio.CancelledError:
             break
         except Exception:

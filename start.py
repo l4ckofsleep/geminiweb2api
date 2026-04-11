@@ -203,6 +203,10 @@ def main():
         print("[*] Активирован режим ОТЛАДКИ (--debug).")
         extra_api_args.append("--debug")
 
+    if "--mobile" in sys.argv:
+        print("[*] Активирован принудительный МОБИЛЬНЫЙ режим (--mobile).")
+        extra_api_args.append("--mobile")
+
     if "--proxy" in sys.argv:
         try:
             idx = sys.argv.index("--proxy")
@@ -238,7 +242,7 @@ def main():
             os.remove(STATE_FILE)
             print(f"[*] Старый файл {STATE_FILE} удален. Профиль браузера сохранен.")
     
-    mobile = is_mobile()
+    mobile = is_mobile() or ("--mobile" in sys.argv)
 
     if not os.path.exists(STATE_FILE):
         if mobile:
