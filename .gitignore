@@ -4,3 +4,27 @@ __pycache__/
 .env
 chrome_profile/
 logs.txt
+logs/
+handoff_*/
+
+# Python / virtualenv
+*.py[cod]
+*.pyo
+*.pyd
+.python-version
+.venv/
+venv/
+env/
+ENV/
+
+# Test / type / tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+
+# IDE / OS junk
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
