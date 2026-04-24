@@ -755,6 +755,24 @@ def normalize_thinking_tags(text, tag_name):
     text = re.sub(r'(?i)</think>|</thinking>', close_tag, text)
     return text
 
+
+THINKING_TEMPLATE_LINES = {
+    "<think_template>",
+    "</think_template>",
+    "<thinking_template>",
+    "</thinking_template>",
+}
+
+
+def strip_thinking_template_lines(text):
+    if not isinstance(text, str) or not text:
+        return ""
+
+    return "".join(
+        line for line in text.splitlines(keepends=True)
+        if line.strip() not in THINKING_TEMPLATE_LINES
+    )
+
 def choose_thinking_tag(prefill_text, generated_text):
     prefill_lower = prefill_text.lower() if isinstance(prefill_text, str) else ""
     generated_lower = generated_text.lower() if isinstance(generated_text, str) else ""
@@ -922,8 +940,8 @@ def postprocess_generated_text(generated_text, prefill_text):
     open_tag = f"<{tag_name}>"
     close_tag = f"</{tag_name}>"
 
-    final_text = normalize_thinking_tags(generated_text, tag_name)
-    normalized_prefill = normalize_thinking_tags(prefill_text, tag_name).strip()
+    final_text = strip_thinking_template_lines(normalize_thinking_tags(generated_text, tag_name))
+    normalized_prefill = strip_thinking_template_lines(normalize_thinking_tags(prefill_text, tag_name)).strip()
     preserve_prefill_newline = normalized_prefill.endswith('>')
     prefill_opens_think_block = normalized_prefill.endswith(open_tag)
     final_text = trim_prefill_echo(final_text, normalized_prefill)
