@@ -5,6 +5,7 @@ import subprocess
 import shutil
 import urllib.request
 import urllib.error
+from log_utils import debug_log, log_line
 
 STATE_FILE = "google_state.json"
 PROFILE_DIR = "chrome_profile"
@@ -15,6 +16,15 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 VERSION_FILE = os.path.join(BASE_DIR, "VERSION")
 ONLINE_VERSION_URL = "https://raw.githubusercontent.com/l4ckofsleep/geminiweb2api/main/VERSION"
 ONLINE_RELEASE_URL = "https://api.github.com/repos/l4ckofsleep/geminiweb2api/releases/latest"
+IS_DEBUG = "--debug" in sys.argv
+
+
+def print_sys(msg):
+    log_line("start", str(msg))
+
+
+def print_debug(label, data=None, max_len=8000):
+    debug_log("start", IS_DEBUG, label, data, max_len=max_len)
 
 def read_local_version():
     try:
@@ -87,6 +97,7 @@ def fetch_online_version():
 
 def print_version_mismatch_notice(local_version):
     online_version = fetch_online_version()
+    print_debug("Version check", {"local_version": local_version, "online_version": online_version})
     if not online_version or local_version == "unknown":
         return
 
@@ -95,13 +106,13 @@ def print_version_mismatch_notice(local_version):
 
     if local_tuple and online_tuple:
         if local_tuple < online_tuple:
-            print(f"[!] Доступна новая версия: {online_version} (у вас {local_version})")
+            print_sys(f"[!] Доступна новая версия: {online_version} (у вас {local_version})")
         elif local_tuple > online_tuple:
-            print(f"[*] Локальная версия новее онлайн-репозитория: {local_version} > {online_version}")
+            print_sys(f"[*] Локальная версия новее онлайн-репозитория: {local_version} > {online_version}")
         return
 
     if local_version != online_version:
-        print(f"[!] Версия отличается от онлайн-репозитория: локальная {local_version}, онлайн {online_version}")
+        print_sys(f"[!] Версия отличается от онлайн-репозитория: локальная {local_version}, онлайн {online_version}")
 
 def load_existing_token_state():
     if not os.path.exists(STATE_FILE):
@@ -130,39 +141,39 @@ def is_mobile():
 
 def run_auth_mobile():
     is_linux = sys.platform.startswith('linux') and not hasattr(sys, 'getandroidapilevel') and 'ANDROID_STORAGE' not in os.environ
-    print("\n" + "="*50)
+    print_sys("\n" + "="*50)
     if is_linux:
-        print("🐧 ОБНАРУЖЕН LINUX. Включаем ручную авторизацию по кукам.")
+        print_sys("🐧 ОБНАРУЖЕН LINUX. Включаем ручную авторизацию по кукам.")
     else:
-        print("📱 ОБНАРУЖЕНО МОБИЛЬНОЕ УСТРОЙСТВО (Android/Termux)")
-    print("="*50)
+        print_sys("📱 ОБНАРУЖЕНО МОБИЛЬНОЕ УСТРОЙСТВО (Android/Termux)")
+    print_sys("="*50)
     if is_linux:
-        print("На Linux Playwright-авторизация может не работать или блокироваться Google как небезопасный браузер.")
-        print("Поэтому здесь используем ручной вход по кукам.")
-        print("Тебе нужно сделать это один раз вручную:")
-        print("1. Открой Firefox / Chrome / другой обычный браузер.")
-        print("2. Установи расширение 'Cookie-Editor' (или аналог для просмотра куков).")
-        print("3. Зайди на gemini.google.com и залогинься.")
-        print("4. Если Gemini не открывается без desktop-режима сайта, включи его в браузере.")
-        print("5. Открой менеджер куков и скопируй ДВА кука:")
+        print_sys("На Linux Playwright-авторизация может не работать или блокироваться Google как небезопасный браузер.")
+        print_sys("Поэтому здесь используем ручной вход по кукам.")
+        print_sys("Тебе нужно сделать это один раз вручную:")
+        print_sys("1. Открой Firefox / Chrome / другой обычный браузер.")
+        print_sys("2. Установи расширение 'Cookie-Editor' (или аналог для просмотра куков).")
+        print_sys("3. Зайди на gemini.google.com и залогинься.")
+        print_sys("4. Если Gemini не открывается без desktop-режима сайта, включи его в браузере.")
+        print_sys("5. Открой менеджер куков и скопируй ДВА кука:")
     else:
-        print("Из-за защиты Android скрипт не может сам достать куки.")
-        print("Тебе нужно сделать это один раз вручную:")
-        print("1. Установи Kiwi Browser или Firefox из Google Play.")
-        print("2. Установи расширение 'Cookie-Editor' через меню дополнений.")
-        print("3. Зайди на gemini.google.com и залогинься.")
-        print("4. ⚡ ВАЖНО: Открой меню браузера (три точки) и включи 'Версия для ПК' (Desktop site)!")
-        print("5. Дождись перезагрузки страницы, открой Cookie-Editor и скопируй ДВА кука:")
-    print("   __Secure-1PSID и SAPISID.")
-    print("-" * 50)
-    print("💡 Если какого-то кука все равно нет, попробуй отправить боту любое сообщение и проверить снова.")
-    print("-" * 50)
+        print_sys("Из-за защиты Android скрипт не может сам достать куки.")
+        print_sys("Тебе нужно сделать это один раз вручную:")
+        print_sys("1. Установи Kiwi Browser или Firefox из Google Play.")
+        print_sys("2. Установи расширение 'Cookie-Editor' через меню дополнений.")
+        print_sys("3. Зайди на gemini.google.com и залогинься.")
+        print_sys("4. ⚡ ВАЖНО: Открой меню браузера (три точки) и включи 'Версия для ПК' (Desktop site)!")
+        print_sys("5. Дождись перезагрузки страницы, открой Cookie-Editor и скопируй ДВА кука:")
+    print_sys("   __Secure-1PSID и SAPISID.")
+    print_sys("-" * 50)
+    print_sys("💡 Если какого-то кука все равно нет, попробуй отправить боту любое сообщение и проверить снова.")
+    print_sys("-" * 50)
 
     psid = input("👉 Вставь значение __Secure-1PSID: ").strip()
     sapisid = input("👉 Вставь значение SAPISID: ").strip()
 
     if not psid or not sapisid:
-        print("[!] Ошибка: нужны оба токена. Внимательно прочитай инструкцию выше и запусти скрипт заново.")
+        print_sys("[!] Ошибка: нужны оба токена. Внимательно прочитай инструкцию выше и запусти скрипт заново.")
         sys.exit(1)
 
     state = {
@@ -176,88 +187,99 @@ def run_auth_mobile():
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f)
 
-    print("\n[+] УСПЕХ! Токены сохранены в файл.")
+    print_sys("\n[+] УСПЕХ! Токены сохранены в файл.")
+    print_debug("Manual auth state saved", {"state_file": STATE_FILE, "keys": list(state.keys())})
 
 def run_auth_pc(proxy_url=None):
-    print("\n" + "="*50)
-    print("💻 ОБНАРУЖЕН ПК (Windows/Mac/Linux)")
-    print("="*50)
-    print("[*] Запуск автоматической авторизации через Playwright...")
+    print_sys("\n" + "="*50)
+    print_sys("💻 ОБНАРУЖЕН ПК (Windows/Mac/Linux)")
+    print_sys("="*50)
+    print_sys("[*] Запуск автоматической авторизации через Playwright...")
     args = [sys.executable, "auth.py"]
     if proxy_url:
         args.extend(["--proxy", proxy_url])
+    if IS_DEBUG:
+        args.append("--debug")
+    print_debug("run_auth_pc args", args)
     return subprocess.run(args)
 
 def run_auto_refresh_pc(proxy_url=None):
-    print("\n[!] Старая сессия больше не подходит. Пробуем один раз автоматически обновить куки...")
+    print_sys("\n[!] Старая сессия больше не подходит. Пробуем один раз автоматически обновить куки...")
     if os.path.exists(STATE_FILE):
         os.remove(STATE_FILE)
-        print(f"[*] Старый файл {STATE_FILE} удален. Профиль браузера сохранен.")
+        print_sys(f"[*] Старый файл {STATE_FILE} удален. Профиль браузера сохранен.")
     return run_auth_pc(proxy_url)
 
 def run_api(extra_args):
-    print("\n[*] Запуск главного сервера API...")
+    print_sys("\n[*] Запуск главного сервера API...")
     args = [sys.executable, "api.py"] + extra_args
+    print_debug("run_api args", args)
     return subprocess.run(args)
 
 def main():
     local_version = read_local_version()
-    print("=" * 40)
-    print(f"🍌 Geminiweb2api v{local_version}")
-    print("=" * 40)
+    print_sys("=" * 40)
+    print_sys(f"🍌 Geminiweb2api v{local_version}")
+    print_sys("=" * 40)
     print_version_mismatch_notice(local_version)
 
     extra_api_args = []
     proxy_url = None
 
     if "--temp" in sys.argv:
-        print("[*] Активирован режим ВРЕМЕННОГО ЧАТА (--temp)")
+        print_sys("[*] Активирован режим ВРЕМЕННОГО ЧАТА (--temp)")
         extra_api_args.append("--temp")
 
     if "--debug" in sys.argv:
-        print("[*] Активирован режим ОТЛАДКИ (--debug).")
+        print_sys("[*] Активирован режим ОТЛАДКИ (--debug).")
         extra_api_args.append("--debug")
 
     if "--mobile" in sys.argv:
-        print("[*] Активирован принудительный МОБИЛЬНЫЙ режим (--mobile).")
+        print_sys("[*] Активирован принудительный МОБИЛЬНЫЙ режим (--mobile).")
         extra_api_args.append("--mobile")
 
     if "--proxy" in sys.argv:
         try:
             idx = sys.argv.index("--proxy")
             proxy_url = sys.argv[idx + 1]
-            print(f"[*] Активирован ПРОКСИ: {proxy_url}")
+            print_sys(f"[*] Активирован ПРОКСИ: {proxy_url}")
             extra_api_args.extend(["--proxy", proxy_url])
         except IndexError:
-            print("[!] Ошибка: Укажи адрес после флага --proxy")
+            print_sys("[!] Ошибка: Укажи адрес после флага --proxy")
             sys.exit(1)
             
     if "--port" in sys.argv:
         try:
             idx = sys.argv.index("--port")
             port_val = sys.argv[idx + 1]
-            print(f"[*] Выбран нестандартный ПОРТ: {port_val}")
+            print_sys(f"[*] Выбран нестандартный ПОРТ: {port_val}")
             extra_api_args.extend(["--port", port_val])
         except IndexError:
-            print("[!] Ошибка: Укажи порт после флага --port")
+            print_sys("[!] Ошибка: Укажи порт после флага --port")
             sys.exit(1)
 
     if "--reauth" in sys.argv:
-        print("\n[!] Запрошена ЖЕСТКАЯ переавторизация (--reauth).")
+        print_sys("\n[!] Запрошена ЖЕСТКАЯ переавторизация (--reauth).")
         if os.path.exists(STATE_FILE):
             os.remove(STATE_FILE)
-            print(f"[*] Старый файл {STATE_FILE} удален.")
+            print_sys(f"[*] Старый файл {STATE_FILE} удален.")
         if os.path.exists(PROFILE_DIR):
             shutil.rmtree(PROFILE_DIR, ignore_errors=True)
-            print(f"[*] Профиль браузера очищен. Потребуется полный вход.")
+            print_sys(f"[*] Профиль браузера очищен. Потребуется полный вход.")
             
     elif "--refresh" in sys.argv:
-        print("\n[!] Запрошено МЯГКОЕ обновление сессии (--refresh).")
+        print_sys("\n[!] Запрошено МЯГКОЕ обновление сессии (--refresh).")
         if os.path.exists(STATE_FILE):
             os.remove(STATE_FILE)
-            print(f"[*] Старый файл {STATE_FILE} удален. Профиль браузера сохранен.")
-    
+            print_sys(f"[*] Старый файл {STATE_FILE} удален. Профиль браузера сохранен.")
+
     mobile = is_mobile() or ("--mobile" in sys.argv)
+    print_debug("Launcher runtime context", {
+        "argv": sys.argv,
+        "mobile": mobile,
+        "proxy_url": proxy_url,
+        "extra_api_args": extra_api_args,
+    })
 
     if not os.path.exists(STATE_FILE):
         if mobile:
@@ -270,16 +292,16 @@ def main():
         if (not mobile) and api_result.returncode == SESSION_INVALID_EXIT_CODE:
             refresh_result = run_auto_refresh_pc(proxy_url)
             if refresh_result.returncode != 0 or not os.path.exists(STATE_FILE):
-                print("\n[❌] Не удалось автоматически обновить сессию.")
-                print("[!] Возможно, Google сейчас лежит, VPN не подходит, аккаунт разлогинен или куки уже окончательно умерли.")
-                print("[!] Проверь, что Gemini открывается в браузере, попробуй сменить VPN или запусти start.py --reauth и войди заново.")
+                print_sys("\n[❌] Не удалось автоматически обновить сессию.")
+                print_sys("[!] Возможно, Google сейчас лежит, VPN не подходит, аккаунт разлогинен или куки уже окончательно умерли.")
+                print_sys("[!] Проверь, что Gemini открывается в браузере, попробуй сменить VPN или запусти start.py --reauth и войди заново.")
                 sys.exit(1)
 
             api_result = run_api(extra_api_args)
             if api_result.returncode == SESSION_INVALID_EXIT_CODE:
-                print("\n[❌] Мы один раз обновили сессию, но Google всё равно не принял новые куки.")
-                print("[!] Возможно, Google сейчас лежит, VPN не подходит, аккаунт разлогинен или куки уже окончательно протухли.")
-                print("[!] Попробуй сменить VPN или запусти start.py --reauth и пройди вход заново.")
+                print_sys("\n[❌] Мы один раз обновили сессию, но Google всё равно не принял новые куки.")
+                print_sys("[!] Возможно, Google сейчас лежит, VPN не подходит, аккаунт разлогинен или куки уже окончательно протухли.")
+                print_sys("[!] Попробуй сменить VPN или запусти start.py --reauth и пройди вход заново.")
                 sys.exit(1)
 
             if api_result.returncode != 0:
@@ -287,11 +309,11 @@ def main():
         elif api_result.returncode != 0:
             sys.exit(api_result.returncode)
     else:
-        print("\n[!] Ошибка: Авторизация не была завершена.")
-        print("[!] Файл google_state.json не создан. Сервер не может быть запущен.")
+        print_sys("\n[!] Ошибка: Авторизация не была завершена.")
+        print_sys("[!] Файл google_state.json не создан. Сервер не может быть запущен.")
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n[!] Выход...")
+        print_sys("\n[!] Выход...")

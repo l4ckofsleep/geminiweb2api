@@ -2,10 +2,20 @@ from playwright.sync_api import sync_playwright
 import os
 import sys
 import json
+from log_utils import debug_log, log_line
 
 STATE_FILE = "google_state.json"
 TOKEN_STATE_KEY = "snlm0e"
 TOKEN_UPDATED_AT_KEY = "snlm0e_updated_at"
+IS_DEBUG = "--debug" in sys.argv
+
+
+def print_sys(msg):
+    log_line("auth", str(msg))
+
+
+def print_debug(label, data=None, max_len=8000):
+    debug_log("auth", IS_DEBUG, label, data, max_len=max_len)
 
 def has_saved_browser_profile(profile_dir):
     if not os.path.isdir(profile_dir):
@@ -133,7 +143,7 @@ def inspect_browser_session(context, debug_label=None):
     page = context.pages[0] if context.pages else context.new_page()
     page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
-    print("[*] Проверка сохраненной сессии в браузере...")
+    print_sys("[*] Проверка сохраненной сессии в браузере...")
     try:
         page.goto("https://gemini.google.com/app", timeout=60000)
         page.wait_for_timeout(4000)
@@ -145,7 +155,15 @@ def inspect_browser_session(context, debug_label=None):
     has_sapisid = any(c.get('name') == 'SAPISID' for c in cookies)
 
     if debug_label:
-        print(f"[*] {debug_label}: __Secure-1PSID={'OK' if has_psid else 'MISSING'}, SAPISID={'OK' if has_sapisid else 'MISSING'}.")
+        print_sys(f"[*] {debug_label}: __Secure-1PSID={'OK' if has_psid else 'MISSING'}, SAPISID={'OK' if has_sapisid else 'MISSING'}.")
+
+    print_debug("Browser session inspection", {
+        "debug_label": debug_label,
+        "cookie_count": len(cookies),
+        "has_psid": has_psid,
+        "has_sapisid": has_sapisid,
+        "current_url": page.url,
+    })
 
     return page, has_psid, has_sapisid
 
@@ -168,7 +186,7 @@ def load_existing_token_state():
     return preserved
 
 def login_and_save_state():
-    print("\n[*] Инициализация браузера для входа...")
+    print_sys("\n[*] Инициализация браузера для входа...")
     
     profile_dir = os.path.join(os.getcwd(), "chrome_profile")
     has_profile = has_saved_browser_profile(profile_dir)
@@ -180,54 +198,67 @@ def login_and_save_state():
             idx = sys.argv.index("--proxy")
             proxy_url = sys.argv[idx + 1]
             proxy_config = {"server": proxy_url}
-            print(f"[*] Playwright использует прокси: {proxy_url}")
+            print_sys(f"[*] Playwright использует прокси: {proxy_url}")
         except IndexError:
             pass
+
+    print_debug("Auth startup context", {
+        "profile_dir": profile_dir,
+        "has_saved_profile": has_profile,
+        "proxy_configured": bool(proxy_config),
+        "argv": sys.argv,
+    })
 
     with sync_playwright() as p:
         attempted_headless_refresh = False
         if has_profile:
-            print("[*] Найден сохраненный браузерный профиль. Сначала пробуем тихий headless-refresh...")
+            print_sys("[*] Найден сохраненный браузерный профиль. Сначала пробуем тихий headless-refresh...")
             context, browser_name = launch_browser_context(p, profile_dir, proxy_config, headless_mode=True)
             attempted_headless_refresh = True
-            print(f"[*] Запущен {browser_name} в headless-режиме для проверки refresh.")
+            print_sys(f"[*] Запущен {browser_name} в headless-режиме для проверки refresh.")
             page, has_psid, has_sapisid = inspect_browser_session(context, debug_label="Headless-refresh debug")
             is_logged_in = has_psid
+            print_debug("Headless refresh result", {
+                "browser_name": browser_name,
+                "is_logged_in": is_logged_in,
+                "has_psid": has_psid,
+                "has_sapisid": has_sapisid,
+            })
 
             if not is_logged_in:
-                print("[!] Headless-refresh не достал рабочую сессию. Откатываемся на обычное окно браузера...")
+                print_sys("[!] Headless-refresh не достал рабочую сессию. Откатываемся на обычное окно браузера...")
                 context.close()
                 context, browser_name = launch_browser_context(p, profile_dir, proxy_config, headless_mode=False)
-                print(f"[*] Запущен {browser_name} с видимым окном для обычного refresh/login.")
+                print_sys(f"[*] Запущен {browser_name} с видимым окном для обычного refresh/login.")
                 page, has_psid, has_sapisid = inspect_browser_session(context)
                 is_logged_in = has_psid
         else:
-            print("[*] Сохраненный браузерный профиль не найден. Сразу запускаем обычное окно браузера...")
+            print_sys("[*] Сохраненный браузерный профиль не найден. Сразу запускаем обычное окно браузера...")
             context, browser_name = launch_browser_context(p, profile_dir, proxy_config, headless_mode=False)
-            print(f"[*] Запущен {browser_name} с видимым окном для первичной авторизации.")
+            print_sys(f"[*] Запущен {browser_name} с видимым окном для первичной авторизации.")
             page, has_psid, has_sapisid = inspect_browser_session(context)
             is_logged_in = has_psid
 
         if is_logged_in:
             if attempted_headless_refresh:
-                print("[+] Headless-refresh нашел рабочую сессию. Сохраняем свежие куки без открытия окна.")
+                print_sys("[+] Headless-refresh нашел рабочую сессию. Сохраняем свежие куки без открытия окна.")
             else:
-                print("[+] Аккаунт найден! Вы уже авторизованы.")
-                print("[*] Молча воруем свежие куки и обновляем сессию...")
+                print_sys("[+] Аккаунт найден! Вы уже авторизованы.")
+                print_sys("[*] Молча воруем свежие куки и обновляем сессию...")
         else:
-            print("[-] Сессия не найдена или устарела.")
-            print("[*] Открываем страницу входа Google...")
+            print_sys("[-] Сессия не найдена или устарела.")
+            print_sys("[*] Открываем страницу входа Google...")
             page.goto("https://accounts.google.com/")
 
-            print("\n" + "="*50)
-            print("[!] ВНИМАНИЕ: Пожалуйста, войдите в свой Google аккаунт.")
-            print("[!] Браузер запомнит вас, и в следующий раз (через --refresh) этого делать не придется!")
-            print("[!] КОГДА ВОЙДЕТЕ — вернитесь в эту консоль и нажмите ENTER.")
-            print("="*50 + "\n")
+            print_sys("\n" + "="*50)
+            print_sys("[!] ВНИМАНИЕ: Пожалуйста, войдите в свой Google аккаунт.")
+            print_sys("[!] Браузер запомнит вас, и в следующий раз (через --refresh) этого делать не придется!")
+            print_sys("[!] КОГДА ВОЙДЕТЕ — вернитесь в эту консоль и нажмите ENTER.")
+            print_sys("="*50 + "\n")
             
             input("👉 Нажмите ENTER, когда закончите авторизацию... ")
 
-            print("[*] Отлично! Переходим на gemini.google.com для сохранения сессии...")
+            print_sys("[*] Отлично! Переходим на gemini.google.com для сохранения сессии...")
             try:
                 page.goto("https://gemini.google.com/app", timeout=60000)
             except Exception:
@@ -240,11 +271,20 @@ def login_and_save_state():
         if not isinstance(state, dict):
             state = {}
         state.update(load_existing_token_state())
+        print_debug("Auth storage state before save", {
+            "cookie_count": len(state.get("cookies", [])),
+            "origin_count": len(state.get("origins", [])),
+            "preserved_token_keys": [key for key in [TOKEN_STATE_KEY, TOKEN_UPDATED_AT_KEY] if key in state],
+        })
 
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f)
 
-        print("\n[+] УСПЕХ! Сессия надежно сохранена в 'google_state.json'.")
+        print_sys("\n[+] УСПЕХ! Сессия надежно сохранена в 'google_state.json'.")
+        print_debug("Auth state saved", {
+            "state_file": STATE_FILE,
+            "cookie_count": len(state.get("cookies", [])),
+        })
         
         context.close()
 
