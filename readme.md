@@ -1,468 +1,522 @@
-# 🍌 GeminiWeb2API (Text & Image Reverse)
+# 🍌 GeminiWeb2API
 
-Неофициальный API-прокси, который превращает веб-версию Google Gemini в мощный локальный сервер. Создан специально для работы в связке с **SillyTavern** (как полноформатный OpenAI-совместимый эндпоинт для текста) и расширениями вроде **SillyImages** (для генерации картинок).
+> **Версия:** 1.3  
+> **Автор:** [@roflenskoy](https://t.me/roflenskoy) (Telegram)  
+> **Репозиторий:** [github.com/l4ckofsleep/geminiweb2api](https://github.com/l4ckofsleep/geminiweb2api)
 
----
-
-## ⚠️ ВАЖНЫЙ ДИСКЛЕЙМЕР (ЧИТАТЬ ОБЯЗАТЕЛЬНО)
-
-Данный проект создан исключительно в образовательных целях. Он использует реверс-инжиниринг внутренних API Google (веб-версии Gemini), что является нарушением Пользовательского соглашения (TOS) Google.
-
-* **Разработчик этого скрипта не несет ответственности за возможные блокировки**.
-* **НАСТОЯТЕЛЬНО РЕКОМЕНДУЕТСЯ** использовать для генераций отдельный (твинк) Google-аккаунт, а не ваш основной, к которому привязаны почта, YouTube или документы. Риск бана за ботоводство всегда существует!
+Неофициальный API-прокси, превращающий веб-версию **Google Gemini** в локальный сервер с OpenAI-совместимым и Gemini-совместимым API. Работает с **SillyTavern** (текст), **SillyImages** (картинки) и любыми другими клиентами.
 
 ---
 
-## ✨ Что умеет этот реверс?
+## 📑 Оглавление
 
-* **Текст и Картинки в одном флаконе:** Универсальный бэкенд для любых задач. Подключайте его как API для ролевых текстовых игр или используйте как движок для рендера иллюстраций к вашим промптам.
-* **Обход цензуры (Только текст):** Скрипт не отправляет ваш промпт "в лоб" голым текстом. Он упаковывает всю историю чата в `chat.json` и скрытно выгружает на серверы Google как документ. Это позволяет пробивать базовые NSFW-фильтры.
-* **Умная работа с `<think>`:** Нативная поддержка моделей с открытым процессом рассуждения (Thinking). Скрипт перехватывает мысли модели, корректно подстраивается под префиллы Таверны и аккуратно склеивает переносы строк, чтобы не ломать CSS и не плодить двойные теги.
-* **Поддержка референсов (Image2Image):** Вы можете отправлять картинки вместе с промптом, скрипт автоматически загрузит их на серверы Гугла как референсы для генерации.
-* **Умная авторизация:** Скрипт сам понимает, где он запущен. На Windows / Mac он использует браузерный Playwright-flow, на Android (Termux) просит ввести куки вручную, а на Linux Desktop работает через тот же ручной cookie-flow, потому что Google может блокировать Playwright как небезопасный браузер.
-* **Нормальная диагностика и логи:** Проект пишет дневные и per-request логи в папку `logs/`, умеет безопасно маскировать чувствительные данные и не падает на Windows-консолях из-за Unicode-символов в логах.
-
----
-
-## 🤖 Разделение моделей (Free vs Pro)
-
-API автоматически отправляет скрытые системные сигналы переключения моделей в зависимости от того, что вы выбрали в вашем клиенте. 
-
-**Для пользователей БЕЗ подписки (Бесплатные аккаунты):**
-* `gemini-3.5-flash` — Базовая, очень быстрая текстовая модель.
-* `gemini-3.5-flash-extended` — Модель с расширенным процессом рассуждения (Thinking). Идеально для глубокого планирования действий персонажа!
-* `nano-banana-2` — Более простая, но бесплатная модель.
-
-**Для подписчиков Google AI Pro (Advanced):**
-* `gemini-3.1-pro-preview` — Тяжелая, максимально умная модель для сложных и длинных сюжетов.
-* `gemini-3.1-pro-extended` — Pro-модель с расширенным рассуждением для максимально сложных задач.
-* `nano-banana-pro` — Более продвинутая модель для генерации картинок, требующая подписки.
-*(Примечание: если у вас нет подписки, но вы выберете Pro-модель, Google может тихо перенаправить запрос на бесплатную версию Flash).*
-
-**Поддерживаемые alias-имена моделей (синонимы):**
-
-*При подключении через `/v1/chat/completions`:*
-* `gemini-3.5-flash` → `gemini-3.5-flash` (базовая).
-* `gemini-3.5-flash-extended` / `gemini-3.5-flash-thinking` → `gemini-3.5-flash-extended`.
-* `gemini-3.1-pro-preview` → `gemini-3.1-pro-preview` (базовая).
-* `gemini-3.1-pro-extended` → `gemini-3.1-pro-extended`.
-* `gemini-3.0-flash-preview` / `gemini-3-flash-preview` / `gemini-3.5-flash-preview` → `gemini-3.5-flash`.
-* `gemini-3.0-flash-thinking-preview` / `gemini-3-flash-thinking-preview` → `gemini-3.5-flash-extended`.
-* `gemini-3.0-pro-preview` / `gemini-3-pro-preview` → `gemini-3.1-pro-preview`.
-* `gemini-3-pro-extended` → `gemini-3.1-pro-extended`.
-
-*При подключении через `/v1beta/models/...` (Gemini API):*
-* **ВСЕ** Flash-модели и их алиасы → `gemini-3.5-flash-extended`.
-* **ВСЕ** Pro-модели и их алиасы → `gemini-3.1-pro-extended`.
+- [⚠️ Дисклеймер](#%EF%B8%8F-%D0%B4%D0%B8%D1%81%D0%BA%D0%BB%D0%B5%D0%B9%D0%BC%D0%B5%D1%80)
+- [✨ Возможности](#-%D0%B2%D0%BE%D0%B7%D0%BC%D0%BE%D0%B6%D0%BD%D0%BE%D1%81%D1%82%D0%B8)
+- [🤖 Модели](#-%D0%BC%D0%BE%D0%B4%D0%B5%D0%BB%D0%B8)
+- [🚀 Быстрый старт](#-%D0%B1%D1%8B%D1%81%D1%82%D1%80%D1%8B%D0%B9-%D1%81%D1%82%D0%B0%D1%80%D1%82)
+- [💻 Установка](#-%D1%83%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0)
+  - [Windows / macOS](#windows--macos)
+  - [Linux Desktop](#linux-desktop)
+  - [Android (Termux)](#android-termux)
+- [🔗 Подключение](#-%D0%BF%D0%BE%D0%B4%D0%BA%D0%BB%D1%8E%D1%87%D0%B5%D0%BD%D0%B8%D0%B5)
+  - [SillyTavern (текст)](#sillytavern-%D1%82%D0%B5%D0%BA%D1%81%D1%82)
+  - [SillyImages (картинки)](#sillyimages-%D0%BA%D0%B0%D1%80%D1%82%D0%B8%D0%BD%D0%BA%D0%B8)
+- [🚩 Флаги запуска](#-%D1%84%D0%BB%D0%B0%D0%B3%D0%B8-%D0%B7%D0%B0%D0%BF%D1%83%D1%81%D0%BA%D0%B0)
+- [🛡️ Прокси](#%EF%B8%8F-%D0%BF%D1%80%D0%BE%D0%BA%D1%81%D0%B8)
+- [🔄 Решение проблем](#-%D1%80%D0%B5%D1%88%D0%B5%D0%BD%D0%B8%D0%B5-%D0%BF%D1%80%D0%BE%D0%B1%D0%BB%D0%B5%D0%BC)
+- [📞 Связь](#-%D1%81%D0%B2%D1%8F%D0%B7%D1%8C)
+- [English version below](#english-version)
 
 ---
 
-## 💻 Установка и запуск (Для Windows / Mac)
+## ⚠️ Дисклеймер
 
-!!!СНАЧАЛА УБЕДИТЕСЬ, ЧТО У ВАС ОТКРЫВАЕТСЯ САЙТ gemini.google.com, А САМОЕ ГЛАВНОЕ, ОТКРЫВАЕТСЯ ЧАТ НА ЭТОМ САЙТЕ! ЕСЛИ ЭТОГО НЕ ПРОИСХОДИТ, В ДАЛЬНЕЙШЕМ СМЫСЛА НЕТ. ИЩИТЕ ВПН, КОТОРЫЙ БУДЕТ ОБХОДИТЬ.!!!
+Проект создан **исключительно в образовательных целях**. Он использует реверс-инжиниринг внутренних API Google, что является нарушением ToS Google.
 
-Для работы потребуется установленный Python 3 (https://www.python.org/downloads/).
-
- Скачайте файлы проекта в пустую папку (В выбранной папке, в строке поиска напишите powershell вместо всего содержимого, или тыкните ПКМ по пустому месту -> Открыть в терминале.):
-
-    git clone https://github.com/l4ckofsleep/geminiweb2api
-	
-   Переходим в клонированную папку:
-   
-    cd geminiweb2api
-
- Установите зависимости:
-
-    pip install fastapi uvicorn httpx playwright "httpx[socks]"
-	
-   И вот эти тоже:
-   
-    playwright install chromium
-
-   Запустите умный лаунчер:
-
-    python start.py
-
-При первом запуске: Скрипт скачает Chromium и откроет окно Google. Вам нужно будет авторизоваться в свой (желательно фейковый) аккаунт, дождаться прогрузки Gemini и нажать ENTER в консоли. Скрипт сохранит вашу сессию и запустит сервер на порту 1717.
-
-Если сессия уже когда-то была сохранена, при `--refresh` или автоматическом desktop-refresh скрипт сначала попробует тихо обновить куки в headless-режиме без открытия окна. Если это не сработает, он откатится к обычному видимому окну браузера.
+- **Используйте отдельный (твинк) Google-аккаунт**, а не основной.
+- Разработчик не несёт ответственности за возможные блокировки.
+- Риск бана за ботоводство всегда существует.
 
 ---
 
-## 🐧 Установка и запуск (Для Linux Desktop)
+## ✨ Возможности
 
-!!!СНАЧАЛА УБЕДИТЕСЬ, ЧТО У ВАС ОТКРЫВАЕТСЯ САЙТ gemini.google.com, А САМОЕ ГЛАВНОЕ, ОТКРЫВАЕТСЯ ЧАТ НА ЭТОМ САЙТЕ! ЕСЛИ ЭТОГО НЕ ПРОИСХОДИТ, В ДАЛЬНЕЙШЕМ СМЫСЛА НЕТ. ИЩИТЕ ВПН, КОТОРЫЙ БУДЕТ ОБХОДИТЬ.!!!
-
-На Linux реверс теперь работает по ручной схеме, близкой к мобильной. Это сделано потому, что Google может блокировать Playwright-авторизацию как небезопасный браузер.
-
-Для работы потребуется установленный Python 3 (https://www.python.org/downloads/).
-
-Скачайте репозиторий и перейдите в папку проекта:
-
-    git clone https://github.com/l4ckofsleep/geminiweb2api
-    cd geminiweb2api
-
-Установите зависимости:
-
-    pip install fastapi uvicorn httpx playwright "httpx[socks]"
-
-При желании Playwright можно оставить установленным как запасной desktop-инструмент, но основной Linux-flow теперь ручной.
-
-Запустите лаунчер:
-
-    python start.py
-
-При первом запуске на Linux: Скрипт попросит вас вручную достать и вставить два кука — `__Secure-1PSID` и `SAPISID`.
-
-Что делать:
-
-1. Откройте Firefox / Chrome / другой обычный браузер.
-2. Установите расширение `Cookie-Editor` (или аналог для просмотра куков).
-3. Зайдите на `gemini.google.com` и залогиньтесь.
-4. Если Gemini не открывается без desktop-режима сайта, включите его в браузере.
-5. Откройте менеджер куков и скопируйте `__Secure-1PSID` и `SAPISID`.
-6. Вставьте их в консоль по запросу лаунчера.
-
-💡 Если какого-то кука не видно, попробуйте отправить в Gemini любое сообщение и проверить снова.
+| Фича | Описание |
+|------|----------|
+| 📝 **Текст + Картинки** | Универсальный бэкенд для ролевых игр и генерации иллюстраций. |
+| 🔓 **Обход цензуры (текст)** | История чата упаковывается в `chat.json` и выгружается как документ — пробивает базовые NSFW-фильтры. |
+| 🧠 **Thinking / Extended** | Нативная поддержка моделей с открытым рассуждением. Корректная обработка `<thinking>` и префиллов. |
+| 🖼️ **Image2Image** | Отправляйте референсы вместе с промптом — скрипт загрузит их на Google как референсы. |
+| 🔑 **Умная авторизация** | Playwright (Win/Mac) или ручные куки (Linux/Android/Termux). |
+| 🔄 **Auto-refresh** | Фоновое обновление токена каждые 4–8 минут. |
+| 📊 **Логи** | Дневные + per-request логи в `logs/`, маскировка sensitive-данных. |
 
 ---
 
-## 📱 Установка и запуск (Для Android / Termux)
+## 🤖 Модели
 
-!!!СНАЧАЛА УБЕДИТЕСЬ, ЧТО У ВАС ОТКРЫВАЕТСЯ САЙТ gemini.google.com, А САМОЕ ГЛАВНОЕ, ОТКРЫВАЕТСЯ ЧАТ НА ЭТОМ САЙТЕ! ЕСЛИ ЭТОГО НЕ ПРОИСХОДИТ, В ДАЛЬНЕЙШЕМ СМЫСЛА НЕТ. ИЩИТЕ ВПН, КОТОРЫЙ БУДЕТ ОБХОДИТЬ.!!!
+API автоматически отправляет скрытые сигналы переключения моделей.
 
-На мобильных устройствах скрипт работает максимально легко, не требуя тяжелых браузерных движков.
+### Доступные модели
 
-   Установите приложение Termux (https://f-droid.org/packages/com.termux/).
+| ID | Описание | Подписка |
+|----|----------|----------|
+| `gemini-3.5-flash` | Базовая, очень быстрая текстовая модель. | Нет |
+| `gemini-3.5-flash-extended` | Расширенное рассуждение (Thinking). | Нет |
+| `gemini-3.1-pro-preview` | Тяжёлая, максимально умная модель. | Да (Pro) |
+| `gemini-3.1-pro-extended` | Pro с расширенным рассуждением. | Да (Pro) |
+| `nano-banana-2` | Простая бесплатная модель. | Нет |
+| `nano-banana-pro` | Продвинутая модель для картинок. | Да (Pro) |
 
-   Выполните базовую настройку и установите пакеты:
-   
-    pkg update && pkg upgrade
-	
-   Потом ставим git:
-   
-    pkg install git
-	
-   После чего ставим питон:
-   
-    pkg install python
-	
-   Ну и вот эти штуки:
-   
-	pkg install rust binutils
-	
-   Ну и вот это надо сделать:
-   
-	export ANDROID_API_LEVEL=24
-	
-   Потом устанавливаем зависимости через pip:
-   
-    pip install fastapi uvicorn httpx "httpx[socks]"
-	
-   (после последней команды установка будет долгой, главное не закрывать termux.)
+### Alias-имена (синонимы)
 
-   Склонируйте сам репозиторий:
-   
-   Переходим в корневую папку:
-   
-    cd
-	
-   Клонируем репозиторий:
-   
-    git clone https://github.com/l4ckofsleep/geminiweb2api
-	
-   Заходим в папку репозитория:
-   
-    cd geminiweb2api
-	
-   Запустите лаунчер:
-   
-    python start.py
+**При подключении через `/v1/chat/completions` (OpenAI-совместимый):**
+- `gemini-3.5-flash` → `gemini-3.5-flash` (базовая)
+- `gemini-3.5-flash-extended` / `gemini-3.5-flash-thinking` → `gemini-3.5-flash-extended`
+- `gemini-3.1-pro-preview` → `gemini-3.1-pro-preview` (базовая)
+- `gemini-3.1-pro-extended` → `gemini-3.1-pro-extended`
+- `gemini-3.0-flash-preview` / `gemini-3-flash-preview` / `gemini-3.5-flash-preview` → `gemini-3.5-flash`
+- `gemini-3.0-flash-thinking-preview` / `gemini-3-flash-thinking-preview` → `gemini-3.5-flash-extended`
+- `gemini-3.0-pro-preview` / `gemini-3-pro-preview` → `gemini-3.1-pro-preview`
+- `gemini-3-pro-extended` → `gemini-3.1-pro-extended`
 
-При первом запуске: Скрипт поймет, что вы на Android, и попросит ввести токены вручную.
+**При подключении через `/v1beta/models/...` (Gemini API):**
+- **ВСЕ** Flash-модели → `gemini-3.5-flash-extended`
+- **ВСЕ** Pro-модели → `gemini-3.1-pro-extended`
 
-   Установите из Google Play браузер Kiwi Browser или Firefox.
-
-   Установите в нем расширение Cookie-Editor (https://addons.mozilla.org/en-US/firefox/addon/cookie-editor/).
-
-   Зайдите на gemini.google.com и авторизуйтесь.
-   
-   !!!Откройте ПК-версию сайта, нажав на кнопку в меню браузера!!!
-
-   Откройте Cookie-Editor и скопируйте значения куков, которые будет запрашивать консоль. Вставьте их в консоль Termux по запросу.
-   
----
-
-## 💡 Варианты использования
-
-1. Как основной текстовый API для SillyTavern (Ролевые игры)
-Скрипт полностью маскируется под OpenAI API. Вы можете использовать всю мощь Gemini (включая умную Thinking-модель) для генерации ответов ваших персонажей с обходом базовых фильтров.
-
-   Как подключить: В SillyTavern зайдите во вкладку API (Вилка) -> Выберите Chat Completion -> Источник для Chat Completion: Кастомный (совместимый с OpenAI) -> Base URL: http://127.0.0.1:1717/v1.
-
-   В поле API Key впишите что угодно (например, banana), скрипту ключ не нужен.
-
-### 🌐 Как включить поиск в Интернете в SillyTavern
-
-Если вы хотите, чтобы Таверна отправляла в реверс Gemini-совместимый запрос с флагом интернет-поиска, подключать это нужно не как обычный OpenAI-compatible endpoint, а через **Google AI Studio**.
-
-Что выставить в настройках подключения:
-
-* **API:** `Chat Completion`
-* **Источник для Chat Completion:** `Google AI Studio`
-* **Прокси** *(раскрывается после выбора Google AI Studio)*:
-  * **Адрес прокси-сервера:** `http://127.0.0.1:1717`
-  * **Пароль от прокси:** любой, состоящий из английских букв и цифр
-* **Модель:** строго одна из моделей, указанных в этом README выше
-
-Потом вернитесь в **первую вкладку настроек**, промотайте чуть ниже и включите:
-
-* **`Включить поиск в Интернете`**
-
-Что происходит дальше: Таверна отправляет Gemini-совместимый запрос с инструментом `google_search`, реверс это замечает и тихо добавляет в hidden prompt инструкцию использовать встроенный поиск Google для полезных деталей сцены. Отдельно в ответе модель не обязана писать, что делала поиск — она просто использует найденное там, где это реально помогает роли.
-
-⚠️ Важно: этот режим сейчас завязан именно на **Google AI Studio / Gemini-compatible flow**. Если подключиться к реверсу как к обычному OpenAI-compatible Chat Completion endpoint, этот флаг поиска в интернет до Gemini не доедет.
-
-2. Как генератор картинок для расширений (например, SillyImages)
-Реверс идеально работает как gemini-совместимый эндпоинт для генерации крутых иллюстраций прямо во время чата. Он нативно дружит с популярным расширением от локала: sillyimages (https://github.com/0xl0cal/sillyimages).
-
-   Как подключить: В настройках расширения выберите источник Gemini-совместимый (nano-banana).
-
-   В поле Base URL (или Reverse Proxy) укажите: http://127.0.0.1:1717
-   
-   В поле API Key впишите что угодно (например, banana), скрипту ключ не нужен.
-
-   Выбирайте в выпадающем списке модель nano-banana-pro (если есть подписка) или nano-banana-2 (если без подписки) и генерируйте шедевры прямо в чате!
+> *Без подписки Pro-модели Google может тихо перенаправить на бесплатную Flash.*
 
 ---
 
-## 🚩 Флаги запуска (Аргументы командной строки)
+## 🚀 Быстрый старт
 
-Вы можете гибко управлять поведением скрипта, добавляя специальные флаги при запуске лаунчера (например: `python start.py --temp --port 5050`):
+```bash
+# 1. Клонировать
+git clone https://github.com/l4ckofsleep/geminiweb2api
+cd geminiweb2api
 
-* **`--temp` (Режим Инкогнито):** Переводит все API-запросы во "Временный чат" Gemini. Ваша ролевая игра и сгенерированные картинки **не будут** оседать в истории вашего аккаунта Google и использоваться для обучения их нейросетей. Идеально для сохранения приватности. *(Флаг нужно указывать при каждом запуске, когда нужна эта функция).*
-* **`--proxy <url>` (Работа через прокси):** Направляет весь трафик скрипта через указанный HTTP/SOCKS прокси. Подробности и правила использования читайте в разделе ниже.
-* **`--port <число>` (Смена порта):** Позволяет запустить API на любом другом порту (по умолчанию используется `1717`). Пример: `--port 8080`.
-* **`--debug` (Режим отладки):** Выводит в консоль и в папку `logs/` расширенную информацию (включая сырые куски ответов от Google). Там сохраняются как дневные логи компонентов, так и отдельные per-request логи. Полезно, если скрипт перестал работать и нужно понять, на каком этапе Гугл блокирует запрос.
-* **`--mobile` (Принудительный мобильный режим):** Заставляет скрипт во всех спорных местах считать, что он запущен как на мобильном устройстве. Полезно, если вы хотите принудительно отключить desktop auto-refresh и сразу использовать ручной cookie-flow даже на ПК.
-* **`--refresh` (Мягкое обновление сессии):** Спасательный круг, если генерация внезапно перестала работать (Гугл протушил токены). На Windows / Mac скрипт удалит старый файл конфигурации и сначала попробует тихо вытащить свежие куки из уже существующего браузерного профиля в headless-режиме; если это не поможет, он откроет обычное окно браузера. На Android / Linux / `--mobile` этот флаг просто удалит сохраненное состояние, после чего скрипт снова попросит вас ввести куки вручную.
-* **`--reauth` (Жесткий сброс):** Полное обнуление (Factory Reset). Скрипт удалит и сохраненные токены, и саму папку профиля встроенного браузера. Используйте этот флаг, если `--refresh` не помогает, если Гугл принудительно разлогинил вас везде, или если вы хотите сменить рабочий Google-аккаунт на другой.
+# 2. Зависимости
+pip install -r requirements.txt
+playwright install chromium
+
+# 3. Запуск
+python start.py
+```
+
+Сервер поднимется на `http://127.0.0.1:1717`.
 
 ---
 
-## 🛡️ Использование ПРОКСИ (Обязательно к прочтению)
+## 💻 Установка
 
-Если вы находитесь в регионе, где Google Gemini заблокирован (например, в РФ), и у вас возникают проблемы с системным VPN, вы можете пустить трафик скрипта через прокси-сервер с помощью флага `--proxy`. Поддерживаются форматы `http://`, `https://`, `socks4://` и `socks5://`.
+> ⚠️ **Перед установкой убедитесь, что открывается `gemini.google.com` и чат на нём.** Если нет — ищите VPN/прокси.
 
-**Пример запуска:** `python start.py --proxy socks5://127.0.0.1:1080`
+### Windows / macOS
 
-> 🚨 **КРИТИЧЕСКИ ВАЖНОЕ ПРАВИЛО: СОВПАДЕНИЕ IP-АДРЕСОВ**
+```bash
+pip install -r requirements.txt
+playwright install chromium
+python start.py
+```
+
+При первом запуске:
+1. Откроется Chromium → авторизуйтесь в Google.
+2. Дождитесь загрузки Gemini.
+3. Нажмите **ENTER** в консоли.
+4. Сессия сохранится, сервер запустится на порту `1717`.
+
+Если сессия уже была сохранена, `--refresh` сначала попробует тихо обновить куки в headless-режиме.
+
+### Linux Desktop
+
+Google может блокировать Playwright как небезопасный браузер, поэтому Linux использует **ручной cookie-flow**:
+
+```bash
+git clone https://github.com/l4ckofsleep/geminiweb2api
+cd geminiweb2api
+pip install -r requirements.txt
+python start.py
+```
+
+При первом запуске скрипт попросит два кука:
+- `__Secure-1PSID`
+- `SAPISID`
+
+**Как достать:**
+1. Откройте обычный браузер, зайдите на `gemini.google.com`.
+2. Установите расширение **Cookie-Editor**.
+3. Скопируйте значения куков и вставьте в консоль по запросу.
+
+> 💡 Если какого-то кука нет — отправьте в Gemini любое сообщение и проверьте снова.
+
+### Android (Termux)
+
+```bash
+pkg update && pkg upgrade
+pkg install git python rust binutils
+export ANDROID_API_LEVEL=24
+pip install fastapi uvicorn httpx "httpx[socks]"
+
+cd
+git clone https://github.com/l4ckofsleep/geminiweb2api
+cd geminiweb2api
+python start.py
+```
+
+При первом запуске:
+1. Установите **Kiwi Browser** или **Firefox**.
+2. Поставьте расширение **Cookie-Editor**.
+3. Зайдите на `gemini.google.com` (включите **Desktop mode**).
+4. Скопируйте куки по запросу консоли.
+
+---
+
+## 🔗 Подключение
+
+### SillyTavern (текст)
+
+1. **API** → `Chat Completion`
+2. **Источник** → `Custom (OpenAI-compatible)`
+3. **Base URL** → `http://127.0.0.1:1717/v1`
+4. **API Key** → любой (например, `banana`)
+5. **Модель** → выберите из списка выше
+
+#### Поиск в Интернете
+
+Для включения поиска подключайтесь через **Google AI Studio**:
+- **API:** `Chat Completion`
+- **Источник:** `Google AI Studio`
+- **Прокси:** `http://127.0.0.1:1717`
+- **Пароль:** любой
+- В первой вкладке настроек включите **`Включить поиск в Интернете`**
+
+### SillyImages (картинки)
+
+1. Выберите источник **Gemini-совместимый (nano-banana)**.
+2. **Base URL** → `http://127.0.0.1:1717`
+3. **API Key** → любой
+4. **Модель** → `nano-banana-pro` (с подпиской) или `nano-banana-2` (бесплатно)
+
+---
+
+## 🚩 Флаги запуска
+
+| Флаг | Описание | Пример |
+|------|----------|--------|
+| `--temp` | Временный чат (не сохраняется в истории Google) | `python start.py --temp` |
+| `--proxy <url>` | Прокси (http/socks4/socks5) | `python start.py --proxy socks5://127.0.0.1:1080` |
+| `--port <число>` | Смена порта | `python start.py --port 8080` |
+| `--debug` | Подробное логирование + raw ответы | `python start.py --debug` |
+| `--mobile` | Принудительно ручной cookie-flow | `python start.py --mobile` |
+| `--refresh` | Мягкое обновление сессии | `python start.py --refresh` |
+| `--reauth` | Жёсткий сброс (Factory Reset) | `python start.py --reauth` |
+
+---
+
+## 🛡️ Прокси
+
+Если Gemini заблокирован в вашем регионе:
+
+```bash
+python start.py --proxy socks5://127.0.0.1:1080
+```
+
+> 🚨 **КРИТИЧЕСКОЕ ПРАВИЛО: совпадение IP**
 >
-> Система безопасности Google жестоко карает за "угон сессий" (Session Hijacking). 
-> **IP-адрес, с которого вы авторизовались в браузере (и скопировали куки), ДОЛЖЕН СОВПАДАТЬ с IP-адресом, через который работает скрипт.** > 
-> * ❌ **КАК ДЕЛАТЬ НЕЛЬЗЯ:** Зайти в браузер под VPN Нидерландов, получить куки, а скрипт запустить через прокси Германии (или вообще без прокси с домашнего интернета). Гугл моментально убьет (аннулирует) вашу сессию, и куки придется доставать заново.
-> * ✅ **КАК ДЕЛАТЬ ПРАВИЛЬНО:** Если вы используете купленный SOCKS5 прокси для скрипта, настройте этот же самый прокси в вашем браузере с помощью расширений (например, Proxy SwitchyOmega), зайдите на Gemini, скопируйте куки, и только потом запускайте скрипт с флагом `--proxy`. 
+> IP, с которого вы авторизовались в браузере, **ДОЛЖЕН СОВПАДАТЬ** с IP скрипта.
+> - ❌ **Нельзя:** зайти через VPN Нидерландов, а скрипт запустить без прокси.
+> - ✅ **Нужно:** настроить тот же прокси в браузере, авторизоваться, потом запустить скрипт с тем же прокси.
 
-**Где взять прокси?**
-Бесплатные публичные прокси из интернета работают крайне плохо — Google часто блокирует их или выдает бесконечную капчу. Рекомендуется купить индивидуальный **IPv4 прокси** на специализированных сайтах (Proxy6, ProxyLine и т.д.). Они стоят дешево, выдаются в одни руки и работают стабильно месяцами.
+### Где брать прокси
 
-### 📱 Как настроить прокси на телефоне (раздельно от остальной системы)
+- **Бесплатные** (только для теста): [proxyscrape.com](https://proxyscrape.com), [free-proxy-list.net](https://free-proxy-list.net)
+- **Платные** (для постоянной работы): Proxy6, ProxyLine, Smartproxy, Oxylabs
 
-На Android удобнее всего сделать так, чтобы **только браузер ходил через прокси**, а остальная система продолжала работать как обычно. Это и есть то самое раздельное туннелирование.
+### Как настроить в браузере
 
-#### Вариант 1 — Firefox + расширение FoxyProxy (самый понятный путь)
-
-Если вы используете **Firefox на Android**, можно попробовать настроить прокси прямо внутри браузера через расширение **FoxyProxy Standard**.
-
-Что делать:
-
-1. Установите **Firefox** из Google Play.
-2. Откройте меню дополнений и найдите **FoxyProxy Standard**.
-3. Создайте профиль прокси и укажите данные в формате вашего сервиса:
-   - `http://логин:пароль@ip:port`
-   - `socks5://логин:пароль@ip:port`
-4. Включите этот профиль для Gemini.
-5. После этого зайдите в `gemini.google.com` именно через этот браузер и только потом копируйте куки / логиньтесь.
-6. Сам реверс запускайте с этим же прокси:
-
-    ```
-    python start.py --proxy socks5://ip:port
-    ```
-
-⚠️ Важно: на Android поддержка дополнений и прокси зависит от версии Firefox и самого расширения. Если конкретно у вас этот путь работает криво, используйте второй вариант ниже.
-
-#### Вариант 2 — Android VPN с раздельным туннелированием по приложениям
-
-Это более надежный вариант, если нужен именно **раздельный маршрут только для браузера**, а не для всего телефона.
-
-Суть:
-
-- ставите VPN/сетевое приложение, которое умеет **split tunneling / app-based routing**;
-- включаете прокси/туннель **только для Firefox или другого браузера**;
-- остальная система остается на обычном интернете.
-
-Что важно:
-
-- не каждое приложение это умеет;
-- удобнее всего искать VPN/туннель-клиенты с функцией **split tunneling**;
-- после этого **реверс в Termux всё равно надо запускать с тем же самым прокси**, иначе Google увидит разные IP.
-
-Пример запуска реверса:
-
-```
-python start.py --proxy socks5://ip:port
-```
-
-💡 Если коротко: **браузер, в котором вы логинитесь в Gemini, и реверс должны выходить в интернет через один и тот же прокси/IP.**
-
-### 💻 Как настроить прокси на компьютере (раздельно от остальной системы)
-
-На ПК сделать раздельное туннелирование еще проще: можно пустить через прокси **только браузер**, а Windows / остальной интернет не трогать вообще.
-
-#### Вариант 1 — через расширение в браузере (рекомендуется)
-
-Самый удобный путь — использовать браузерное расширение управления прокси:
-
-- **FoxyProxy Standard** — хороший актуальный вариант;
-- **ZeroOmega** — современная замена старого SwitchyOmega-подхода;
-- сам **SwitchyOmega** можно встретить в старых гайдах, но он уже не лучший вариант.
-
-Что делать:
-
-1. Установите Firefox / Chrome / Edge.
-2. Поставьте расширение **FoxyProxy** или **ZeroOmega**.
-3. Создайте профиль прокси с вашим IP / портом / логином / паролем.
-4. Включите этот профиль в браузере.
-5. Откройте `gemini.google.com` именно в этом браузере и авторизуйтесь.
-6. После этого запускайте реверс с **тем же самым** прокси:
-
-    ```
-    python start.py --proxy socks5://ip:port
-    ```
-
-Такой способ хорош тем, что:
-
-- браузер работает через прокси;
-- сам реверс работает через прокси;
-- вся остальная система — нет.
-
-#### Вариант 2 — встроенные настройки Firefox
-
-У Firefox на ПК есть собственные сетевые настройки, поэтому можно обойтись даже без расширения:
-
-1. Откройте **Настройки → Сеть / Network Settings**.
-2. Выберите **Manual proxy configuration**.
-3. Впишите ваш HTTP/SOCKS прокси.
-4. Сохраните и откройте Gemini в этом браузере.
-5. Затем запустите реверс с тем же прокси:
-
-    ```
-    python start.py --proxy socks5://ip:port
-    ```
-
-Это тоже дает раздельное туннелирование: Firefox идет через прокси отдельно, остальная система — как обычно.
-
-### 🌍 Где брать прокси
-
-Сразу по-честному: **бесплатные прокси бывают, но для Gemini они почти всегда плохие**. Их часто банят, они нестабильные, медленные, с капчами, с отвалами и с чужими пользователями на одном IP.
-
-#### Бесплатные варианты
-
-Подходят только чтобы **быстро проверить, запускается ли соединение вообще**:
-
-- **ProxyScrape** — https://proxyscrape.com/free-proxy-list
-- **Advanced.name** — https://advanced.name/freeproxy
-- **Spys.one** — https://spys.one/en/
-- **HideMy.name** — https://hidemy.name/en/proxy-list/
-- **Free Proxy List / Socks Proxy** — https://free-proxy-list.net/ и https://free-proxy-list.net/en/socks-proxy.html
-- временные тестовые прокси из Telegram-каналов / форумов
-
-Но нужно понимать:
-
-- для постоянной работы это почти всегда мусор;
-- Google очень быстро режет такие IP;
-- даже если логин пройдет, сессия может умереть через несколько минут;
-- на бесплатных прокси часто бывают бесконечные капчи и ошибки авторизации.
-
-Если вам нужен не тест на 5 минут, а нормальная рабочая схема — почти всегда придется брать **платный индивидуальный прокси**.
-
-#### Платные варианты
-
-Лучше всего искать **индивидуальные IPv4 HTTP/SOCKS5 прокси** с нормальной репутацией и стабильным IP.
-
-Что обычно подходит:
-
-- **Proxy6**
-- **ProxyLine**
-- разные **реселлеры прокси в Telegram / локальных витринах**, если у них есть нормальная репутация и понятная выдача IP;
-- зарубежные сервисы уровня **Smartproxy**, **Oxylabs**, **Bright Data** — но только если у вас реально есть способ их оплатить.
-
-Для РФ в 2026 году главный критерий такой:
-
-- смотрите, можно ли оплатить **криптой**;
-- смотрите, есть ли **реселлеры / витрины / продавцы**, которые принимают способы оплаты, доступные в РФ;
-- не рассчитывайте заранее, что любой зарубежный сервис примет российскую карту напрямую;
-- перед покупкой лучше проверить способы оплаты прямо на сайте или у продавца в поддержке.
-
-На что смотреть при покупке:
-
-- поддержка **SOCKS5** или **HTTPS**;
-- отдельный IP, а не общий публичный мусорный пул;
-- стабильная страна, где Gemini нормально открывается;
-- желательно возможность долго держать один и тот же IP.
-
-⚠️ Еще раз главное правило: **авторизоваться в Gemini и запускать реверс нужно через один и тот же прокси.**
+- **ПК:** FoxyProxy / ZeroOmega расширение.
+- **Android:** Firefox + FoxyProxy, или VPN с split tunneling.
 
 ---
 
-## 🔄 Управление сессиями и Решение проблем
+## 🔄 Решение проблем
 
-Выдает пустой ответ, или дефолтную думалку гемини, и ничего более.
+| Симптом | Решение |
+|---------|---------|
+| Пустой ответ / дефолтная думалка | Проверьте [age-verification](https://myaccount.google.com/age-verification) и настройки думалки. |
+| Вместо картинки — референс | Цензура Google. С картинками такое бывает. |
+| `502` до получения токена | Проблема на стороне Google. Откройте Gemini в инкогнито — если там тоже `502`, просто подождите. |
+| Сессия сбросилась | `python start.py --refresh` (Win/Mac) или `--reauth` для полного сброса. |
+| VPS не работает | Google банит IP крупных хостингов. Используйте домашний IP + прокси. |
 
--Проверьте, подтвержден ли возраст Вашего аккаунта тут: https://myaccount.google.com/age-verification, а также проверьте настройки думалки.
-
-Вместо картинки выдает референс одного из персонажей!
-
--Цензура, с картинками такое бывает ДАЖЕ в безобидных сценах, уже не говоря про NSFW. Ничего не поделать.
-
-На VPS реверс вполне себе может и не работать, ведь гугл делает "теневые баны" на адреса крупных хостингов, не позволяя пользоваться Gemini Web. Просто имейте в виду.
-
-Вечных сессий не бывает. Если вы сменили пароль от Google, нажали кнопку "Выйти" в браузере или Гугл просто обнулил токены (обычно они живут месяцами), генерация перестанет работать.
-
-Если сессия сбросилась И вы на Windows / Mac, введите:
-
-    python start.py --refresh
-
-Скрипт сначала попробует тихо обновить куки без открытия окна. Если это не сработает, он откроет обычный браузерный refresh/login flow.
-
-Если вы на Linux / Android / Termux (или специально запустили скрипт с `--mobile`), `--refresh` просто удалит старое сохранение и попросит вас заново вставить куки вручную.
-
-Чтобы сбросить старую сессию и авторизоваться заново, просто запустите скрипт с флагом:
-
-	python start.py --reauth
-
-Скрипт удалит старый файл google_state.json и предложит пройти авторизацию с чистого листа.
-
-Иногда Google может временно сломать свою внутреннюю выдачу токена Gemini (условно говоря, у них там что-то отваливается на своей стороне), и тогда реверс вместо нормальной работы начинает упираться в ошибку `502` еще до получения токена.
-
-Проверяется это просто:
-
-- откройте `gemini.google.com` в режиме **инкогнито**;
-- если там тоже вылезает `502`, значит проблема сейчас на стороне Google, а не у вас.
-
-В таком случае ничего чинить не надо — **просто подождите**, пока у Google это само оживет.
-
-Если вам нужно разбираться в сбоях глубже, смотрите папку `logs/`:
-
-- там лежат дневные логи по компонентам (`api`, `auth`, `start`);
-- для API-запросов создаются отдельные request-scoped файлы;
-- чувствительные токены и куки в логах маскируются.
-
-📞 Связь
-
-Возникли проблемы, нашли баг или есть идеи для улучшения?
-Пишите в Telegram: @roflenskoy
+Логи находятся в папке `logs/`:
+- Дневные логи по компонентам (`api-YYYY-MM-DD.log`)
+- Per-request логи
+- Токены и куки маскируются
 
 ---
 
-Current version: 1.2
+## 📞 Связь
+
+Возникли проблемы, нашли баг или есть идеи?
+
+**Telegram:** [@roflenskoy](https://t.me/roflenskoy)
+
+---
+
+# English Version
+
+---
+
+## 📑 Table of Contents
+
+- [⚠️ Disclaimer](#%EF%B8%8F-disclaimer)
+- [✨ Features](#-features)
+- [🤖 Models](#-models)
+- [🚀 Quick Start](#-quick-start)
+- [💻 Installation](#-installation)
+  - [Windows / macOS](#windows--macos-1)
+  - [Linux Desktop](#linux-desktop-1)
+  - [Android (Termux)](#android-termux-1)
+- [🔗 Connection](#-connection)
+  - [SillyTavern (text)](#sillytavern-text)
+  - [SillyImages (images)](#sillyimages-images)
+- [🚩 Launch Flags](#-launch-flags)
+- [🛡️ Proxy](#%EF%B8%8F-proxy)
+- [🔄 Troubleshooting](#-troubleshooting)
+- [📞 Contact](#-contact)
+
+---
+
+## ⚠️ Disclaimer
+
+This project is **for educational purposes only**. It uses reverse engineering of Google's internal Gemini web APIs, which violates Google's Terms of Service.
+
+- **Use a separate (throwaway) Google account**, not your main one.
+- The developer is not responsible for any bans or restrictions.
+- Risk of account suspension for bot-like activity always exists.
+
+---
+
+## ✨ Features
+
+| Feature | Description |
+|---------|-------------|
+| 📝 **Text + Images** | Universal backend for roleplay and image generation. |
+| 🔓 **Censorship bypass (text)** | Chat history is packed into `chat.json` and uploaded as a document — bypasses basic NSFW filters. |
+| 🧠 **Thinking / Extended** | Native support for reasoning models. Correct handling of `<thinking>` tags and prefills. |
+| 🖼️ **Image2Image** | Send reference images with prompts — the script uploads them to Google as references. |
+| 🔑 **Smart auth** | Playwright (Win/Mac) or manual cookies (Linux/Android/Termux). |
+| 🔄 **Auto-refresh** | Background token refresh every 4–8 minutes. |
+| 📊 **Logs** | Daily + per-request logs in `logs/`, sensitive data masking. |
+
+---
+
+## 🤖 Models
+
+The API automatically sends hidden model-switching signals.
+
+### Available Models
+
+| ID | Description | Subscription |
+|----|-------------|--------------|
+| `gemini-3.5-flash` | Basic, very fast text model. | No |
+| `gemini-3.5-flash-extended` | Extended reasoning (Thinking). | No |
+| `gemini-3.1-pro-preview` | Heavy, maximally smart model. | Yes (Pro) |
+| `gemini-3.1-pro-extended` | Pro with extended reasoning. | Yes (Pro) |
+| `nano-banana-2` | Simple free model. | No |
+| `nano-banana-pro` | Advanced image generation model. | Yes (Pro) |
+
+### Model Aliases
+
+**When connecting via `/v1/chat/completions` (OpenAI-compatible):**
+- `gemini-3.5-flash` → `gemini-3.5-flash` (basic)
+- `gemini-3.5-flash-extended` / `gemini-3.5-flash-thinking` → `gemini-3.5-flash-extended`
+- `gemini-3.1-pro-preview` → `gemini-3.1-pro-preview` (basic)
+- `gemini-3.1-pro-extended` → `gemini-3.1-pro-extended`
+- `gemini-3.0-flash-preview` / `gemini-3-flash-preview` / `gemini-3.5-flash-preview` → `gemini-3.5-flash`
+- `gemini-3.0-flash-thinking-preview` / `gemini-3-flash-thinking-preview` → `gemini-3.5-flash-extended`
+- `gemini-3.0-pro-preview` / `gemini-3-pro-preview` → `gemini-3.1-pro-preview`
+- `gemini-3-pro-extended` → `gemini-3.1-pro-extended`
+
+**When connecting via `/v1beta/models/...` (Gemini API):**
+- **ALL** Flash models → `gemini-3.5-flash-extended`
+- **ALL** Pro models → `gemini-3.1-pro-extended`
+
+> *Without a subscription, Google may silently redirect Pro models to the free Flash version.*
+
+---
+
+## 🚀 Quick Start
+
+```bash
+# 1. Clone
+git clone https://github.com/l4ckofsleep/geminiweb2api
+cd geminiweb2api
+
+# 2. Dependencies
+pip install -r requirements.txt
+playwright install chromium
+
+# 3. Launch
+python start.py
+```
+
+Server will start at `http://127.0.0.1:1717`.
+
+---
+
+## 💻 Installation
+
+> ⚠️ **Before installing, make sure `gemini.google.com` and the chat on it are accessible.** If not — find a VPN/proxy.
+
+### Windows / macOS
+
+```bash
+pip install -r requirements.txt
+playwright install chromium
+python start.py
+```
+
+First launch:
+1. Chromium opens → log in to Google.
+2. Wait for Gemini to load.
+3. Press **ENTER** in the console.
+4. Session is saved, server starts on port `1717`.
+
+If session was already saved, `--refresh` will try to silently update cookies in headless mode first.
+
+### Linux Desktop
+
+Google may block Playwright as an unsafe browser, so Linux uses **manual cookie flow**:
+
+```bash
+git clone https://github.com/l4ckofsleep/geminiweb2api
+cd geminiweb2api
+pip install -r requirements.txt
+python start.py
+```
+
+On first launch, the script will ask for two cookies:
+- `__Secure-1PSID`
+- `SAPISID`
+
+**How to get them:**
+1. Open a regular browser, go to `gemini.google.com`.
+2. Install the **Cookie-Editor** extension.
+3. Copy the cookie values and paste them into the console when prompted.
+
+> 💡 If a cookie is missing — send any message in Gemini and check again.
+
+### Android (Termux)
+
+```bash
+pkg update && pkg upgrade
+pkg install git python rust binutils
+export ANDROID_API_LEVEL=24
+pip install fastapi uvicorn httpx "httpx[socks]"
+
+cd
+git clone https://github.com/l4ckofsleep/geminiweb2api
+cd geminiweb2api
+python start.py
+```
+
+First launch:
+1. Install **Kiwi Browser** or **Firefox**.
+2. Install the **Cookie-Editor** extension.
+3. Go to `gemini.google.com` (enable **Desktop mode**).
+4. Copy cookies as requested by the console.
+
+---
+
+## 🔗 Connection
+
+### SillyTavern (text)
+
+1. **API** → `Chat Completion`
+2. **Source** → `Custom (OpenAI-compatible)`
+3. **Base URL** → `http://127.0.0.1:1717/v1`
+4. **API Key** → anything (e.g., `banana`)
+5. **Model** → select from the list above
+
+#### Web Search
+
+To enable search, connect via **Google AI Studio**:
+- **API:** `Chat Completion`
+- **Source:** `Google AI Studio`
+- **Proxy:** `http://127.0.0.1:1717`
+- **Password:** anything
+- In the first settings tab, enable **`Enable Web Search`**
+
+### SillyImages (images)
+
+1. Select source **Gemini-compatible (nano-banana)**.
+2. **Base URL** → `http://127.0.0.1:1717`
+3. **API Key** → anything
+4. **Model** → `nano-banana-pro` (with subscription) or `nano-banana-2` (free)
+
+---
+
+## 🚩 Launch Flags
+
+| Flag | Description | Example |
+|------|-------------|---------|
+| `--temp` | Temporary chat (not saved to Google history) | `python start.py --temp` |
+| `--proxy <url>` | Proxy (http/socks4/socks5) | `python start.py --proxy socks5://127.0.0.1:1080` |
+| `--port <number>` | Change port | `python start.py --port 8080` |
+| `--debug` | Verbose logging + raw responses | `python start.py --debug` |
+| `--mobile` | Force manual cookie flow | `python start.py --mobile` |
+| `--refresh` | Soft session refresh | `python start.py --refresh` |
+| `--reauth` | Hard reset (Factory Reset) | `python start.py --reauth` |
+
+---
+
+## 🛡️ Proxy
+
+If Gemini is blocked in your region:
+
+```bash
+python start.py --proxy socks5://127.0.0.1:1080
+```
+
+> 🚨 **CRITICAL RULE: IP matching**
+>
+> The IP you used to log in to the browser **MUST MATCH** the IP used by the script.
+> - ❌ **Wrong:** log in via Netherlands VPN, run script without proxy.
+> - ✅ **Right:** set the same proxy in the browser, log in, then run the script with the same proxy.
+
+### Where to get proxies
+
+- **Free** (testing only): [proxyscrape.com](https://proxyscrape.com), [free-proxy-list.net](https://free-proxy-list.net)
+- **Paid** (for production): Proxy6, ProxyLine, Smartproxy, Oxylabs
+
+### Browser setup
+
+- **PC:** FoxyProxy / ZeroOmega extension.
+- **Android:** Firefox + FoxyProxy, or VPN with split tunneling.
+
+---
+
+## 🔄 Troubleshooting
+
+| Symptom | Solution |
+|---------|----------|
+| Empty response / default thinking block | Check [age-verification](https://myaccount.google.com/age-verification) and thinking settings. |
+| Reference instead of image | Google censorship. Happens even in harmless scenes. |
+| `502` before token retrieval | Issue on Google's side. Open Gemini in incognito — if `502` there too, just wait. |
+| Session expired | `python start.py --refresh` (Win/Mac) or `--reauth` for full reset. |
+| VPS not working | Google bans IPs of large hosting providers. Use home IP + proxy. |
+
+Logs are in `logs/`:
+- Daily logs by component (`api-YYYY-MM-DD.log`)
+- Per-request logs
+- Tokens and cookies are masked
+
+---
+
+## 📞 Contact
+
+Found a bug or have ideas?
+
+**Telegram:** [@roflenskoy](https://t.me/roflenskoy)
