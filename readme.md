@@ -29,19 +29,31 @@
 API автоматически отправляет скрытые системные сигналы переключения моделей в зависимости от того, что вы выбрали в вашем клиенте. 
 
 **Для пользователей БЕЗ подписки (Бесплатные аккаунты):**
-* `gemini-3.0-flash-preview` — Базовая, очень быстрая текстовая модель.
-* `gemini-3.0-flash-thinking-preview` — Модель с открытым процессом рассуждения. Идеально для глубокого планирования действий персонажа!
+* `gemini-3.5-flash` — Базовая, очень быстрая текстовая модель.
+* `gemini-3.5-flash-extended` — Модель с расширенным процессом рассуждения (Thinking). Идеально для глубокого планирования действий персонажа!
 * `nano-banana-2` — Более простая, но бесплатная модель.
 
 **Для подписчиков Google AI Pro (Advanced):**
 * `gemini-3.1-pro-preview` — Тяжелая, максимально умная модель для сложных и длинных сюжетов.
+* `gemini-3.1-pro-extended` — Pro-модель с расширенным рассуждением для максимально сложных задач.
 * `nano-banana-pro` — Более продвинутая модель для генерации картинок, требующая подписки.
 *(Примечание: если у вас нет подписки, но вы выберете Pro-модель, Google может тихо перенаправить запрос на бесплатную версию Flash).*
 
 **Поддерживаемые alias-имена моделей (синонимы):**
-* `gemini-3-flash-preview` → автоматически приводится к `gemini-3.0-flash-preview`.
-* `gemini-3-pro-preview` → автоматически приводится к `gemini-3.1-pro-preview`.
-* `gemini-3.0-pro-preview` → автоматически приводится к `gemini-3.1-pro-preview`.
+
+*При подключении через `/v1/chat/completions`:*
+* `gemini-3.5-flash` → `gemini-3.5-flash` (базовая).
+* `gemini-3.5-flash-extended` / `gemini-3.5-flash-thinking` → `gemini-3.5-flash-extended`.
+* `gemini-3.1-pro-preview` → `gemini-3.1-pro-preview` (базовая).
+* `gemini-3.1-pro-extended` → `gemini-3.1-pro-extended`.
+* `gemini-3.0-flash-preview` / `gemini-3-flash-preview` / `gemini-3.5-flash-preview` → `gemini-3.5-flash`.
+* `gemini-3.0-flash-thinking-preview` / `gemini-3-flash-thinking-preview` → `gemini-3.5-flash-extended`.
+* `gemini-3.0-pro-preview` / `gemini-3-pro-preview` → `gemini-3.1-pro-preview`.
+* `gemini-3-pro-extended` → `gemini-3.1-pro-extended`.
+
+*При подключении через `/v1beta/models/...` (Gemini API):*
+* **ВСЕ** Flash-модели и их алиасы → `gemini-3.5-flash-extended`.
+* **ВСЕ** Pro-модели и их алиасы → `gemini-3.1-pro-extended`.
 
 ---
 

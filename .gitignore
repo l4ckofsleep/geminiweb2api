@@ -28,3 +28,14 @@ ENV/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Research / temporary scripts
+.research/
+decode_*.py
+tmp_*.py
+
+# Outdated tests (need update for new header format)
+test_request_shape.py
+
+# Internal dev docs (outdated, update before committing)
+PROJECT_REFERENCE.md
