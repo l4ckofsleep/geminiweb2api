@@ -1759,29 +1759,105 @@ def normalize_requested_model(model_name, force_extended=False):
 
     if normalized.startswith("/v1beta/models/"):
         normalized = normalized[len("/v1beta/models/"):]
-    if normalized.startswith("models/"):
+    # Допускаем повторяющийся `models/` префикс — некоторые клиенты шлют `models/gemini-...`,
+    # после которого ST/SDK ещё раз добавляют `models/` в URL.
+    while normalized.startswith("models/"):
         normalized = normalized[len("models/"):]
     if ":" in normalized:
         normalized = normalized.split(":", 1)[0]
 
+    # Картиночные nano-banana-модели пропускаем как есть — для них своя ветка.
+    if "nano-banana" in normalized:
+        return normalized
+
+    is_pro = "pro" in normalized
+    is_flash = "flash" in normalized
+    is_thinking = any(token in normalized for token in ("extended", "thinking", "think"))
+
     if force_extended:
         # v1beta: всё сводим к extended-моделям
-        if normalized in ["gemini-3.1-pro-extended", "gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3.0-pro-preview", "gemini-3-pro-extended"]:
+        if is_pro:
             return "gemini-3.1-pro-extended"
-        if normalized in ["gemini-3.5-flash-extended", "gemini-3.5-flash", "gemini-3.0-flash-preview", "gemini-3-flash-preview", "gemini-3.5-flash-preview", "gemini-3.5-flash-thinking", "gemini-3.0-flash-thinking-preview", "gemini-3-flash-thinking-preview", "gemini-3.5-flash-thinking-preview"]:
+        if is_flash:
             return "gemini-3.5-flash-extended"
         return normalized
 
-    # v1: чёткое разделение
-    if normalized in ["gemini-3.1-pro-extended", "gemini-3-pro-extended"]:
-        return "gemini-3.1-pro-extended"
-    if normalized in ["gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3.0-pro-preview"]:
-        return "gemini-3.1-pro-preview"
-    if normalized in ["gemini-3.5-flash-extended", "gemini-3.5-flash-thinking", "gemini-3.0-flash-thinking-preview", "gemini-3-flash-thinking-preview", "gemini-3.5-flash-thinking-preview"]:
-        return "gemini-3.5-flash-extended"
-    if normalized in ["gemini-3.5-flash", "gemini-3.0-flash-preview", "gemini-3-flash-preview", "gemini-3.5-flash-preview"]:
-        return "gemini-3.5-flash"
+    # v1: чёткое разделение pro/flash + extended/preview
+    if is_pro:
+        return "gemini-3.1-pro-extended" if is_thinking else "gemini-3.1-pro-preview"
+    if is_flash:
+        return "gemini-3.5-flash-extended" if is_thinking else "gemini-3.5-flash"
     return normalized
+
+def coerce_message_content_to_text(content):
+    """Превращает любое поле `content` (OpenAI-стиля) в плоскую строку.
+
+    OpenAI допускает массив частей (`[{"type":"text","text":"..."}, {"type":"image_url",...}]`)
+    и `null` для tool-сообщений. Если оставить такие значения как есть, Gemini увидит в chat.json
+    структурированный объект вместо текста и фактически проигнорирует это сообщение, из-за чего
+    последнее сообщение юзера/префилл «пропадает» из контекста.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                if item:
+                    parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, str) and text:
+                parts.append(text)
+                continue
+            # Картинки/файлы — фиксируем плейсхолдером, чтобы сообщение не выпадало целиком.
+            if item.get("type") == "image_url" or "image_url" in item:
+                parts.append("[image attachment]")
+            elif item.get("type") == "input_audio" or "audio_url" in item:
+                parts.append("[audio attachment]")
+            elif "inline_data" in item or "inlineData" in item:
+                parts.append("[inline attachment]")
+        return "\n".join(parts)
+    if isinstance(content, dict):
+        text = content.get("text")
+        if isinstance(text, str):
+            return text
+        return ""
+    return str(content)
+
+
+def extract_system_instruction_text(system_instruction):
+    """Парсит `systemInstruction` из Gemini API формата в плоский текст."""
+    if not system_instruction:
+        return ""
+    if isinstance(system_instruction, str):
+        return system_instruction.strip()
+    if isinstance(system_instruction, dict):
+        parts = system_instruction.get("parts")
+        text_chunks = []
+        if isinstance(parts, list):
+            for part in parts:
+                if isinstance(part, dict):
+                    text = part.get("text")
+                    if isinstance(text, str) and text:
+                        text_chunks.append(text)
+                elif isinstance(part, str) and part:
+                    text_chunks.append(part)
+        # Бывает и плоский { "text": "..." } без parts.
+        flat_text = system_instruction.get("text")
+        if isinstance(flat_text, str) and flat_text:
+            text_chunks.append(flat_text)
+        return "\n".join(text_chunks).strip()
+    if isinstance(system_instruction, list):
+        return "\n".join(
+            extract_system_instruction_text(item) for item in system_instruction
+        ).strip()
+    return ""
+
 
 def build_chat_history_from_gemini_contents(contents):
     chat_history = []
@@ -1794,6 +1870,7 @@ def build_chat_history_from_gemini_contents(contents):
         normalized_role = "assistant" if role == "model" else "user"
         parts = item.get("parts", [])
         text_parts = []
+        has_attachment = False
 
         if isinstance(parts, list):
             for part in parts:
@@ -1802,8 +1879,18 @@ def build_chat_history_from_gemini_contents(contents):
                 text = part.get("text")
                 if isinstance(text, str) and text:
                     text_parts.append(text)
+                    continue
+                if "inline_data" in part or "inlineData" in part:
+                    has_attachment = True
+                elif "file_data" in part or "fileData" in part:
+                    has_attachment = True
 
         combined_text = "\n".join(text_parts).strip()
+        if not combined_text and has_attachment:
+            # Не теряем сообщение, если оно состоит только из вложения —
+            # ставим плейсхолдер, чтобы последнее user-сообщение не исчезло из chat.json.
+            combined_text = "[attachment]"
+
         if combined_text:
             chat_history.append({
                 "role": normalized_role,
@@ -1812,7 +1899,7 @@ def build_chat_history_from_gemini_contents(contents):
 
     prefill_text = ""
     if chat_history and chat_history[-1].get("role") == "assistant":
-        prefill_text = chat_history[-1].get("content", "").strip()
+        prefill_text = str(chat_history[-1].get("content", "") or "").strip()
 
     return chat_history, prefill_text
 
@@ -1848,10 +1935,11 @@ def build_roleplay_safe_prompt(enable_google_search=False):
         )
     return prompt
 
-async def handle_gemini_text_generation(request: Request, data, requested_model):
+async def handle_gemini_text_generation(request: Request, data, requested_model, stream: bool = False):
     print_debug("Gemini text request payload", {
         "path": request.url.path,
         "requested_model": requested_model,
+        "stream": stream,
         "payload": data,
     }, max_len=16000)
     contents = data.get("contents", [])
@@ -1859,12 +1947,29 @@ async def handle_gemini_text_generation(request: Request, data, requested_model)
         return JSONResponse({"error": "No contents provided"}, status_code=400)
 
     chat_history, prefill_text = build_chat_history_from_gemini_contents(contents)
+
+    system_text = extract_system_instruction_text(
+        data.get("systemInstruction") or data.get("system_instruction")
+    )
+    if system_text:
+        # Кладём системный промпт первым сообщением chat.json — иначе character card/persona
+        # из Google AI Studio source просто теряются.
+        chat_history.insert(0, {"role": "system", "content": system_text})
+
     if not chat_history:
         return JSONResponse({"error": "No text content provided"}, status_code=400)
 
     file_content = json.dumps(chat_history, ensure_ascii=False, indent=2)
     safe_prompt = build_roleplay_safe_prompt(enable_google_search=has_google_search_tool(data))
     effective_model = normalize_requested_model(requested_model, force_extended=False)
+
+    if stream:
+        return StreamingResponse(
+            gemini_stream_generate_content(
+                request, safe_prompt, effective_model, file_content, prefill_text
+            ),
+            media_type="text/event-stream",
+        )
 
     generated_text = await generate_text_core(request, safe_prompt, model_name=effective_model, file_content=file_content)
     if generated_text is None:
@@ -1883,6 +1988,64 @@ async def handle_gemini_text_generation(request: Request, data, requested_model)
             }
         ]
     })
+
+
+async def gemini_stream_generate_content(request: Request, safe_prompt, effective_model, file_content, prefill_text):
+    """SSE-стрим в Gemini API формате (`:streamGenerateContent?alt=sse`).
+
+    Внутри сервер всё равно ждёт полный ответ от Google и отдаёт его одним финальным чанком —
+    но клиенту это видно как корректный SSE-поток, аналогично OpenAI-ветке.
+    """
+    task = asyncio.create_task(
+        generate_text_core(request, safe_prompt, model_name=effective_model, file_content=file_content)
+    )
+    try:
+        while not task.done():
+            if await request.is_disconnected():
+                print_sys("🛑 [ПРЕРВАНО] SSE-клиент (Gemini) отключился, отменяем генерацию.")
+                task.cancel()
+                return
+
+            _, pending = await asyncio.wait([task], timeout=10.0)
+            if pending:
+                # Empty parts keep the SSE socket alive on slow generations.
+                ping = {"candidates": [{"content": {"role": "model", "parts": [{"text": ""}]}}]}
+                yield f"data: {json.dumps(ping)}\n\n"
+
+        try:
+            generated_text = task.result()
+        except asyncio.CancelledError:
+            print_sys("🏁 ЗАВЕРШЕНО. Gemini-стрим был отменен клиентом.")
+            return
+        except Exception as e:
+            print_sys(f"[❌] ОШИБКА ФОНОВОЙ GEMINI-ГЕНЕРАЦИИ: {e}")
+            err = {"error": {"message": "Generation failed. Check server logs.", "type": "server_error"}}
+            yield f"data: {json.dumps(err)}\n\n"
+            return
+
+        if generated_text is None:
+            err = {"error": {"message": "Generation failed. Check server logs.", "type": "server_error"}}
+            yield f"data: {json.dumps(err)}\n\n"
+            return
+
+        final_text = postprocess_generated_text(generated_text, prefill_text)
+        payload = {
+            "candidates": [
+                {
+                    "content": {"role": "model", "parts": [{"text": final_text}]},
+                    "finishReason": "STOP",
+                    "index": 0,
+                }
+            ]
+        }
+        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 @app.get('/v1/models')
 @app.get('/v1beta/models')
@@ -1911,8 +2074,14 @@ async def list_models(request: Request):
 
 @app.post('/v1/images/generations')
 @app.post('/v1beta/models/{model}:generateContent')
+@app.post('/v1beta/models/{model}:streamGenerateContent')
+@app.post('/v1beta/models/models/{model}:generateContent')
+@app.post('/v1beta/models/models/{model}:streamGenerateContent')
 @app.options('/v1/images/generations')
 @app.options('/v1beta/models/{model}:generateContent')
+@app.options('/v1beta/models/{model}:streamGenerateContent')
+@app.options('/v1beta/models/models/{model}:generateContent')
+@app.options('/v1beta/models/models/{model}:streamGenerateContent')
 async def unified_image_generation(request: Request, model: str = None):
     if request.method == 'OPTIONS': return JSONResponse({})
     token, _ = start_api_request_logging(request, "generation")
@@ -1930,16 +2099,19 @@ async def unified_image_generation(request: Request, model: str = None):
         body_model = data.get('model')
         requested_model = body_model or model or "nano-banana-pro"
         is_v1beta = request.url.path.startswith('/v1beta/')
+        is_stream_path = ':streamGenerateContent' in request.url.path
         effective_model = normalize_requested_model(requested_model, force_extended=is_v1beta)
         reference_images_b64 = []
 
         if is_v1beta:
             print_sys(
-                f"[*] Gemini-compatible request: path model={model!r}, body model={body_model!r}, requested={requested_model!r}, effective={effective_model!r}"
+                f"[*] Gemini-compatible request: path model={model!r}, body model={body_model!r}, requested={requested_model!r}, effective={effective_model!r}, stream={is_stream_path}"
             )
 
         if not is_image_model(effective_model):
-            return await handle_gemini_text_generation(request, data, effective_model)
+            return await handle_gemini_text_generation(
+                request, data, effective_model, stream=is_stream_path
+            )
 
         ref_single = data.get('image')
         if ref_single:
@@ -2043,10 +2215,19 @@ async def chat_completions(request: Request):
 
         chat_history = []
         for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            text = coerce_message_content_to_text(msg.get("content"))
+            if not text:
+                continue
             chat_history.append({
                 "role": msg.get("role", "user"),
-                "content": msg.get("content", "")
+                "content": text,
             })
+
+        if not chat_history:
+            print_sys("[❌] Ошибка: после нормализации не осталось текстовых сообщений.")
+            return JSONResponse({"error": "No text content provided"}, status_code=400)
 
         file_content = json.dumps(chat_history, ensure_ascii=False, indent=2)
         safe_prompt = build_roleplay_safe_prompt()
@@ -2059,12 +2240,14 @@ async def chat_completions(request: Request):
             "effective_model": effective_model,
             "is_stream": is_stream,
             "message_count": len(messages),
+            "chat_history_len": len(chat_history),
         })
 
         prefill_text = ""
-        if messages and messages[-1].get("role") == "assistant":
-            prefill_text = messages[-1].get("content", "").strip()
-            print_sys(f"[*] Обнаружен префилл от Таверны (Длина: {len(prefill_text)} символов).")
+        if chat_history and chat_history[-1].get("role") == "assistant":
+            prefill_text = str(chat_history[-1].get("content", "") or "").strip()
+            if prefill_text:
+                print_sys(f"[*] Обнаружен префилл от Таверны (Длина: {len(prefill_text)} символов).")
 
         if is_stream:
             async def sse_stream():

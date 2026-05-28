@@ -2,6 +2,15 @@
 
 Ниже — сводка наших совместных изменений по текущему состоянию проекта.
 
+## 2026-05-28 — v1.3.1
+
+### Исправления для chat.json и алиасов моделей
+- В OpenAI-ветке `/v1/chat/completions` `content` теперь корректно нормализуется в строку. Раньше `content: null` (типично для assistant-сообщения с `tool_calls`) валил сервер с `AttributeError`, а массив частей (мультимодальный `[{text}, {image_url}]`) уходил в chat.json как структурированный объект и фактически терялся для Gemini — последнее сообщение юзера/префилл выглядело пустым.
+- В Gemini-ветке `build_chat_history_from_gemini_contents` теперь не выбрасывает сообщения, состоящие только из `inlineData`/`fileData` (вместо текста подставляется плейсхолдер `[attachment]`), и `prefill_text` устойчиво приводится к строке.
+- Добавлен SSE-эндпоинт `/v1beta/models/{model}:streamGenerateContent` — без него подключение «Google AI Studio» в SillyTavern со включённым стримом давало 404 на любой модели (включая `gemini-3.5-flash`).
+- Учитывается поле `systemInstruction` — character card / persona из Google AI Studio больше не теряются и кладутся первым system-сообщением в chat.json.
+- Алиас-матчер `normalize_requested_model` стал устойчивее: любая `*flash*` модель в `/v1beta` сводится к `gemini-3.5-flash-extended`, любая `*pro*` — к `gemini-3.1-pro-extended`, токены `extended/thinking` корректно разводятся; повторный префикс `models/` (в имени и URL) стрипается.
+
 ## 2026-04-24 — v1.2
 
 ### StreamGenerate / устойчивость текстовой генерации
