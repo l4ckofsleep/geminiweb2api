@@ -39,3 +39,7 @@ test_request_shape.py
 
 # Internal dev docs (outdated, update before committing)
 PROJECT_REFERENCE.md
+
+# Local agent/runtime notes
+AGENTS.md
+GEMINI_FIX_PROGRESS.md
