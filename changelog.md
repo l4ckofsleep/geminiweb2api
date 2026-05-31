@@ -2,6 +2,11 @@
 
 Ниже — сводка наших совместных изменений по текущему состоянию проекта.
 
+## 2026-05-31 - v1.3.2
+
+### Fixed replies to previous messages
+- Fixed replies to previous messages.
+
 ## 2026-05-28 — v1.3.1
 
 ### Исправления для chat.json и алиасов моделей
