@@ -5,13 +5,14 @@ import subprocess
 import shutil
 import urllib.request
 import urllib.error
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from gemini_session import REQUIRED_SESSION_COOKIES, get_gemini_session_cookies
 from log_utils import debug_log, log_line
 
 STATE_FILE = "google_state.json"
 PROFILE_DIR = "chrome_profile"
 SESSION_INVALID_EXIT_CODE = 86
-TOKEN_STATE_KEY = "snlm0e"
-TOKEN_UPDATED_AT_KEY = "snlm0e_updated_at"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 VERSION_FILE = os.path.join(BASE_DIR, "VERSION")
 ONLINE_VERSION_URL = "https://raw.githubusercontent.com/l4ckofsleep/geminiweb2api/main/VERSION"
@@ -114,24 +115,6 @@ def print_version_mismatch_notice(local_version):
     if local_version != online_version:
         print_sys(f"[!] Версия отличается от онлайн-репозитория: локальная {local_version}, онлайн {online_version}")
 
-def load_existing_token_state():
-    if not os.path.exists(STATE_FILE):
-        return {}
-
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            state = json.load(f)
-        if not isinstance(state, dict):
-            return {}
-    except Exception:
-        return {}
-
-    preserved = {}
-    for key in [TOKEN_STATE_KEY, TOKEN_UPDATED_AT_KEY]:
-        if key in state:
-            preserved[key] = state[key]
-    return preserved
-
 def is_mobile():
     if 'com.termux' in os.environ.get('PREFIX', ''): return True
     if 'ANDROID_STORAGE' in os.environ: return True
@@ -140,55 +123,50 @@ def is_mobile():
     return False
 
 def run_auth_mobile():
-    is_linux = sys.platform.startswith('linux') and not hasattr(sys, 'getandroidapilevel') and 'ANDROID_STORAGE' not in os.environ
     print_sys("\n" + "="*50)
-    if is_linux:
-        print_sys("🐧 ОБНАРУЖЕН LINUX. Включаем ручную авторизацию по кукам.")
-    else:
-        print_sys("📱 ОБНАРУЖЕНО МОБИЛЬНОЕ УСТРОЙСТВО (Android/Termux)")
+    print_sys("🔑 Ручная авторизация через JSON-экспорт cookies")
     print_sys("="*50)
-    if is_linux:
-        print_sys("На Linux Playwright-авторизация может не работать или блокироваться Google как небезопасный браузер.")
-        print_sys("Поэтому здесь используем ручной вход по кукам.")
-        print_sys("Тебе нужно сделать это один раз вручную:")
-        print_sys("1. Открой Firefox / Chrome / другой обычный браузер.")
-        print_sys("2. Установи расширение 'Cookie-Editor' (или аналог для просмотра куков).")
-        print_sys("3. Зайди на gemini.google.com и залогинься.")
-        print_sys("4. Если Gemini не открывается без desktop-режима сайта, включи его в браузере.")
-        print_sys("5. Открой менеджер куков и скопируй ДВА кука:")
-    else:
-        print_sys("Из-за защиты Android скрипт не может сам достать куки.")
-        print_sys("Тебе нужно сделать это один раз вручную:")
-        print_sys("1. Установи Kiwi Browser или Firefox из Google Play.")
-        print_sys("2. Установи расширение 'Cookie-Editor' через меню дополнений.")
-        print_sys("3. Зайди на gemini.google.com и залогинься.")
-        print_sys("4. ⚡ ВАЖНО: Открой меню браузера (три точки) и включи 'Версия для ПК' (Desktop site)!")
-        print_sys("5. Дождись перезагрузки страницы, открой Cookie-Editor и скопируй ДВА кука:")
-    print_sys("   __Secure-1PSID и SAPISID.")
-    print_sys("-" * 50)
-    print_sys("💡 Если какого-то кука все равно нет, попробуй отправить боту любое сообщение и проверить снова.")
-    print_sys("-" * 50)
+    print_sys("1. Войди в Gemini на gemini.google.com. На телефоне при необходимости включи версию сайта для ПК.")
+    print_sys("2. На вкладке Gemini открой Cookie-Editor, выбери Export → JSON и сохрани весь экспорт в файл.")
+    print_sys("3. Укажи путь к файлу. Подойдёт и google_state.json из браузерной авторизации на ПК.")
 
-    psid = input("👉 Вставь значение __Secure-1PSID: ").strip()
-    sapisid = input("👉 Вставь значение SAPISID: ").strip()
-
-    if not psid or not sapisid:
-        print_sys("[!] Ошибка: нужны оба токена. Внимательно прочитай инструкцию выше и запусти скрипт заново.")
+    try:
+        source = input("👉 Путь к JSON-экспорту: ").strip().strip("\"'").strip()
+    except EOFError:
+        source = ""
+    if not source:
+        print_sys("[!] Путь к файлу не указан.")
         sys.exit(1)
 
-    state = {
-        "cookies": [
-            {"name": "__Secure-1PSID", "value": psid, "domain": ".google.com"},
-            {"name": "SAPISID", "value": sapisid, "domain": ".google.com"}
-        ]
-    }
-    state.update(load_existing_token_state())
+    try:
+        exported = json.loads(Path(source).expanduser().read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, ValueError):
+        print_sys("[!] Не удалось прочитать файл. Проверь путь и формат JSON.")
+        sys.exit(1)
 
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f)
+    cookies = get_gemini_session_cookies(exported.get("cookies") if isinstance(exported, dict) else exported)
+    missing = REQUIRED_SESSION_COOKIES - {cookie["name"] for cookie in cookies}
+    if missing:
+        print_sys(f"[!] В экспорте отсутствуют cookies входа: {', '.join(sorted(missing))}. Сделай полный экспорт на вкладке Gemini.")
+        sys.exit(1)
 
-    print_sys("\n[+] УСПЕХ! Токены сохранены в файл.")
-    print_debug("Manual auth state saved", {"state_file": STATE_FILE, "keys": list(state.keys())})
+    state_path = Path(STATE_FILE)
+    temporary_path = None
+    try:
+        with NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=state_path.parent, prefix=f".{state_path.name}.", delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            json.dump({"cookies": cookies}, temporary_file)
+        temporary_path.replace(state_path)
+    except OSError:
+        print_sys(f"[!] Не удалось сохранить {STATE_FILE}. Проверь права на запись в папку проекта.")
+        sys.exit(1)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+    print_sys(f"[+] Сессия сохранена в {STATE_FILE}.")
 
 def run_auth_pc(proxy_url=None):
     print_sys("\n" + "="*50)
@@ -258,7 +236,11 @@ def main():
             print_sys("[!] Ошибка: Укажи порт после флага --port")
             sys.exit(1)
 
-    if "--reauth" in sys.argv:
+    mobile = is_mobile() or ("--mobile" in sys.argv)
+    refresh_requested = "--reauth" in sys.argv or "--refresh" in sys.argv
+    if mobile and (refresh_requested or not os.path.exists(STATE_FILE)):
+        run_auth_mobile()
+    elif not mobile and "--reauth" in sys.argv:
         print_sys("\n[!] Запрошена ЖЕСТКАЯ переавторизация (--reauth).")
         if os.path.exists(STATE_FILE):
             os.remove(STATE_FILE)
@@ -267,13 +249,12 @@ def main():
             shutil.rmtree(PROFILE_DIR, ignore_errors=True)
             print_sys(f"[*] Профиль браузера очищен. Потребуется полный вход.")
             
-    elif "--refresh" in sys.argv:
+    elif not mobile and "--refresh" in sys.argv:
         print_sys("\n[!] Запрошено МЯГКОЕ обновление сессии (--refresh).")
         if os.path.exists(STATE_FILE):
             os.remove(STATE_FILE)
             print_sys(f"[*] Старый файл {STATE_FILE} удален. Профиль браузера сохранен.")
 
-    mobile = is_mobile() or ("--mobile" in sys.argv)
     print_debug("Launcher runtime context", {
         "argv": sys.argv,
         "mobile": mobile,
@@ -281,11 +262,8 @@ def main():
         "extra_api_args": extra_api_args,
     })
 
-    if not os.path.exists(STATE_FILE):
-        if mobile:
-            run_auth_mobile()
-        else:
-            run_auth_pc(proxy_url)
+    if not mobile and not os.path.exists(STATE_FILE):
+        run_auth_pc(proxy_url)
 
     if os.path.exists(STATE_FILE):
         api_result = run_api(extra_api_args)

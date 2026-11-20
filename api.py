@@ -16,6 +16,7 @@ import asyncio
 import sys
 import random
 import threading
+from gemini_session import get_gemini_session_cookies
 from log_utils import debug_log, debug_log_throttled, log_line, reset_request_log, sanitize_headers, start_request_log
 
 # Парсинг аргументов
@@ -52,14 +53,6 @@ TOKEN_STATE_KEY = "snlm0e"
 TOKEN_UPDATED_AT_KEY = "snlm0e_updated_at"
 SESSION_INVALID_EXIT_CODE = 86
 GEMINI_ORIGIN = "https://gemini.google.com"
-GEMINI_SESSION_COOKIES = {
-    "SID", "HSID", "SSID", "APISID", "SAPISID", "SIDCC",
-    "__Secure-1PAPISID", "__Secure-3PAPISID",
-    "__Secure-1PSID", "__Secure-3PSID",
-    "__Secure-1PSIDTS", "__Secure-3PSIDTS",
-    "__Secure-1PSIDCC", "__Secure-3PSIDCC",
-    "OSID", "__Secure-OSID", "COMPASS",
-}
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -347,7 +340,7 @@ async def refresh_snlm0e_from_cookies(reason):
 
 def print_final_session_failure(reason):
     if IS_MOBILE:
-        print_sys(f"[❌] {reason}: не удалось использовать токен и получить новый по кукам. На телефоне авто-refresh невозможен. Запусти start.py --reauth и войди заново. Если не поможет, проверь VPN и доступность Gemini.")
+        print_sys(f"[❌] {reason}: не удалось обновить токен. Сделай свежий JSON-экспорт cookies со вкладки Gemini и запусти start.py --refresh.")
         return
 
     print_sys(f"[❌] {reason}: не удалось использовать токен, получить новый по кукам, и автоматический refresh тоже не помог. Возможно, Google сейчас лежит, VPN не подходит, куки нужно сбросить или запустить start.py --reauth.")
@@ -543,21 +536,18 @@ async def init_session():
         sapisid = None
         has_base_cookie = False
         
-        for cookie in state.get("cookies", []):
-            if (
-                cookie['domain'].lstrip('.') in {"google.com", "gemini.google.com"}
-                and cookie['name'] in GEMINI_SESSION_COOKIES
-            ):
-                GLOBAL_CLIENT.cookies.set(
-                    cookie['name'], cookie['value'], domain=cookie['domain'], path=cookie.get('path', '/'),
-                )
-                if cookie['name'] == 'SAPISID':
-                    sapisid = cookie['value']
-                if cookie['name'] == '__Secure-1PSID':
-                    has_base_cookie = True
+        cookies = get_gemini_session_cookies(state.get("cookies"))
+        for cookie in cookies:
+            GLOBAL_CLIENT.cookies.set(
+                cookie['name'], cookie['value'], domain=cookie['domain'], path=cookie['path'],
+            )
+            if cookie['name'] == 'SAPISID':
+                sapisid = cookie['value']
+            if cookie['name'] == '__Secure-1PSID':
+                has_base_cookie = True
 
         print_debug("Loaded session state", {
-            "cookie_names": [cookie.get("name") for cookie in state.get("cookies", [])],
+            "cookie_names": [cookie["name"] for cookie in cookies],
             "has_base_cookie": has_base_cookie,
             "has_sapisid": bool(sapisid),
             "has_saved_token": bool(load_saved_snlm0e(state)),
@@ -620,7 +610,7 @@ async def keep_alive_worker():
                 if IS_DEBUG: print_sys("[DEBUG] Keep-alive: Сессия активна.")
             else:
                 if IS_MOBILE:
-                    print_sys("[!] Keep-alive: Сессия убита Гуглом. На телефоне запусти start.py --reauth и войди заново.")
+                    print_sys("[!] Keep-alive: Не удалось обновить сессию. Импортируй свежий JSON-экспорт cookies через start.py --refresh.")
                     continue
 
                 refreshed_session = await run_desktop_auto_refresh("Keep-alive")
@@ -2850,7 +2840,7 @@ if __name__ == "__main__":
         session_ok = await init_session()
         if not session_ok:
             if IS_MOBILE:
-                print_sys("[❌] Не удалось ни использовать токен, ни получить новый по кукам. На телефоне авто-refresh невозможен. Либо упали Google, либо VPN не подходит, либо нужно заново снять куки.")
+                print_sys("[❌] Gemini не принял сессию. Проверь, что Gemini открыт в браузере, затем импортируй свежий JSON-экспорт cookies через start.py --refresh.")
                 raise SystemExit(1)
 
             print_sys("[!] Куки устарели или стали недействительными. Возвращаемся в лаунчер и пробуем один автоматический refresh...")

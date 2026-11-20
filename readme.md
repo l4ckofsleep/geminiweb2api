@@ -140,16 +140,7 @@ pip install -r requirements.txt
 python start.py
 ```
 
-При первом запуске скрипт попросит два кука:
-- `__Secure-1PSID`
-- `SAPISID`
-
-**Как достать:**
-1. Откройте обычный браузер, зайдите на `gemini.google.com`.
-2. Установите расширение **Cookie-Editor**.
-3. Скопируйте значения куков и вставьте в консоль по запросу.
-
-> 💡 Если какого-то кука нет — отправьте в Gemini любое сообщение и проверьте снова.
+При первом запуске укажите путь к JSON-экспорту cookies. Используйте те же шаги, что и в разделе для Termux.
 
 ### Android (Termux)
 
@@ -165,11 +156,11 @@ cd geminiweb2api
 python start.py
 ```
 
-При первом запуске:
-1. Установите **Kiwi Browser** или **Firefox**.
-2. Поставьте расширение **Cookie-Editor**.
-3. Зайдите на `gemini.google.com` (включите **Desktop mode**).
-4. Скопируйте куки по запросу консоли.
+1. Установите **Cookie-Editor** в Firefox для Android и войдите в Gemini на `gemini.google.com`. При необходимости включите версию сайта для ПК.
+2. На вкладке Gemini выберите в Cookie-Editor **Export → JSON**. Сохраните весь экспорт в файл, например `~/gemini-cookies.json`.
+3. Введите путь к файлу, когда его попросит `start.py`. Лаунчер создаст `google_state.json`.
+
+Если у вас есть рабочий `google_state.json` с ПК, положите его рядом с `start.py` и запустите `python start.py`. Для повторного импорта свежего экспорта запустите `python start.py --refresh`. Храните экспорт и файл сессии приватно.
 
 ---
 
@@ -210,8 +201,8 @@ python start.py
 | `--port <число>` | Смена порта | `python start.py --port 8080` |
 | `--debug` | Подробное логирование + raw ответы | `python start.py --debug` |
 | `--mobile` | Принудительно ручной cookie-flow | `python start.py --mobile` |
-| `--refresh` | Мягкое обновление сессии | `python start.py --refresh` |
-| `--reauth` | Жёсткий сброс (Factory Reset) | `python start.py --reauth` |
+| `--refresh` | Обновление сессии. В ручном режиме запрашивает новый JSON-экспорт | `python start.py --refresh` |
+| `--reauth` | Сброс браузерного профиля на Win/Mac. В ручном режиме запрашивает новый JSON-экспорт | `python start.py --reauth` |
 
 ---
 
@@ -401,16 +392,7 @@ pip install -r requirements.txt
 python start.py
 ```
 
-On first launch, the script will ask for two cookies:
-- `__Secure-1PSID`
-- `SAPISID`
-
-**How to get them:**
-1. Open a regular browser, go to `gemini.google.com`.
-2. Install the **Cookie-Editor** extension.
-3. Copy the cookie values and paste them into the console when prompted.
-
-> 💡 If a cookie is missing — send any message in Gemini and check again.
+On first launch, enter the path to a JSON cookie export. Follow the same steps as for Termux.
 
 ### Android (Termux)
 
@@ -426,11 +408,11 @@ cd geminiweb2api
 python start.py
 ```
 
-First launch:
-1. Install **Kiwi Browser** or **Firefox**.
-2. Install the **Cookie-Editor** extension.
-3. Go to `gemini.google.com` (enable **Desktop mode**).
-4. Copy cookies as requested by the console.
+1. Install **Cookie-Editor** in Firefox for Android and sign in at `gemini.google.com`. Enable the desktop site if needed.
+2. On the Gemini tab, select **Export → JSON** in Cookie-Editor. Save the full export to a file such as `~/gemini-cookies.json`.
+3. Enter the file path when `start.py` prompts you. The launcher creates `google_state.json`.
+
+If you have a working `google_state.json` from a desktop session, place it next to `start.py` and run `python start.py`. To import a fresh export, run `python start.py --refresh`. Keep the export and session file private.
 
 ---
 
@@ -471,8 +453,8 @@ To enable search, connect via **Google AI Studio**:
 | `--port <number>` | Change port | `python start.py --port 8080` |
 | `--debug` | Verbose logging + raw responses | `python start.py --debug` |
 | `--mobile` | Force manual cookie flow | `python start.py --mobile` |
-| `--refresh` | Soft session refresh | `python start.py --refresh` |
-| `--reauth` | Hard reset (Factory Reset) | `python start.py --reauth` |
+| `--refresh` | Refresh the session. In manual mode, prompts for a fresh JSON export | `python start.py --refresh` |
+| `--reauth` | Reset the browser profile on Windows or macOS. In manual mode, prompts for a fresh JSON export | `python start.py --reauth` |
 
 ---
 
