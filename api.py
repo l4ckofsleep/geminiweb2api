@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 import httpx
 import json
 import re
@@ -50,6 +51,15 @@ STATE_FILE = "google_state.json"
 TOKEN_STATE_KEY = "snlm0e"
 TOKEN_UPDATED_AT_KEY = "snlm0e_updated_at"
 SESSION_INVALID_EXIT_CODE = 86
+GEMINI_ORIGIN = "https://gemini.google.com"
+GEMINI_SESSION_COOKIES = {
+    "SID", "HSID", "SSID", "APISID", "SAPISID", "SIDCC",
+    "__Secure-1PAPISID", "__Secure-3PAPISID",
+    "__Secure-1PSID", "__Secure-3PSID",
+    "__Secure-1PSIDTS", "__Secure-3PSIDTS",
+    "__Secure-1PSIDCC", "__Secure-3PSIDCC",
+    "OSID", "__Secure-OSID", "COMPASS",
+}
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -70,20 +80,48 @@ GLOBAL_CLIENT = httpx.AsyncClient(**client_kwargs)
 
 # --- Глобальный кэш для снижения спама запросами ---
 CACHED_SNLM0E = None
-CURRENT_MODEL_ID = None
-CURRENT_THINKING_LEVEL = 1
 session_initialized = False
+web_client_session_id = str(uuid.uuid4()).upper()
 browser_request_context_cache = {}
 browser_request_context_updated_at = 0.0
 browser_request_context_lock = threading.Lock()
 BROWSER_REQUEST_CONTEXT_TTL_SECONDS = 600.0
+web_model_catalog = None
+web_model_catalog_updated_at = 0.0
+web_model_catalog_lock = asyncio.Lock()
+MODEL_CATALOG_RPC = "otAQ7b"
 stream_generate_reqid_lock = threading.Lock()
 stream_generate_reqid_counter = (int(time.time() * 1000) % 9000000) + 1000000
 DEFAULT_STREAM_METADATA = ["", "", "", None, None, None, None, None, None, ""]
-DEFAULT_MODEL_CAPACITY_TAIL = 2
 ACTIVE_TURN_MARKER_START = "<<<GEMINIWEB2API_ACTIVE_TURN_START>>>"
 ACTIVE_TURN_MARKER_END = "<<<GEMINIWEB2API_ACTIVE_TURN_END>>>"
 ACTIVE_TURN_METADATA_MARKER = "GEMINIWEB2API_ACTIVE_TURN_METADATA"
+
+
+@dataclass(frozen=True)
+class WebTextModel:
+    mode_id: str
+    model_type: int
+    capacity: int = 2
+    capacity_field: int = 12
+
+
+LEGACY_TEXT_MODELS = {
+    "gemini-3.5-flash": WebTextModel("56fdd199312815e2", 1),
+    "gemini-3.5-flash-extended": WebTextModel("56fdd199312815e2", 1),
+    "gemini-3.1-pro-preview": WebTextModel("e6fa609c3fa255c0", 3),
+    "gemini-3.1-pro-extended": WebTextModel("e6fa609c3fa255c0", 3),
+}
+
+
+class WebModelError(Exception):
+    def __init__(self, message, status_code, code):
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+
+    def payload(self):
+        return {"error": {"message": str(self), "code": self.code}}
 
 
 def get_default_browser_hl():
@@ -138,8 +176,7 @@ def cache_browser_request_context(context):
 
     with browser_request_context_lock:
         browser_request_context_cache = {
-            **browser_request_context_cache,
-            **{key: value for key, value in context.items() if isinstance(value, str) and value.strip()},
+            key: value for key, value in context.items() if isinstance(value, str) and value.strip()
         }
         browser_request_context_updated_at = time.monotonic()
 
@@ -173,15 +210,21 @@ def build_stream_generate_url(browser_context, reqid=None):
     return f"https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?{httpx.QueryParams(params)}"
 
 
-def build_stream_generate_headers(base_headers, mode_id, request_uuid, model_type=1, thinking_level=1, capacity_tail=DEFAULT_MODEL_CAPACITY_TAIL):
+def build_stream_generate_headers(
+    base_headers, mode_id, request_uuid, model_type=1, thinking_level=1,
+    capacity=2, capacity_field=12, client_session_id=None,
+):
     headers = base_headers.copy()
     headers["Accept-Language"] = headers.get("Accept-Language", "ru,en;q=0.9,en-GB;q=0.8,en-US;q=0.7")
     headers["Origin"] = "https://gemini.google.com"
     headers["Referer"] = "https://gemini.google.com/"
-    headers["x-goog-ext-525001261-jspb"] = json.dumps(
-        [1, None, None, None, mode_id, None, None, 0, [4, 5, 6, 8], None, None, 2, None, None, model_type, thinking_level, request_uuid],
-        separators=(',', ':'),
-    )
+    model_header = [
+        1, None, None, None, mode_id, None, None, 0, [4, 5, 6, 8],
+        None, None, None, None, None, model_type, thinking_level, client_session_id or request_uuid,
+    ]
+    # JSPB fields are numbered starting at 1.
+    model_header[capacity_field - 1] = capacity
+    headers["x-goog-ext-525001261-jspb"] = json.dumps(model_header, separators=(',', ':'))
     headers["x-goog-ext-525005358-jspb"] = json.dumps([request_uuid, 1], separators=(',', ':'))
     headers["x-goog-ext-73010989-jspb"] = "[0]"
     headers["x-goog-ext-73010990-jspb"] = "[0, 0, 0]"
@@ -196,13 +239,13 @@ def build_chat_json_file_data(doc_id, filename="chat.json"):
     return build_attachment_file_data(doc_id, filename, "application/json")
 
 
-def build_stream_generate_payload(prompt, file_data, candidate_id, request_uuid, language, temporary_chat):
-    inner_req_list: list[object] = [None] * 69
+def build_stream_generate_payload(
+    prompt, file_data, request_uuid, language, temporary_chat, model_type, thinking_level,
+):
+    inner_req_list: list[object] = [None] * 81
     inner_req_list[0] = [prompt, 0, None, file_data, None, None, 0]
     inner_req_list[1] = [language]
     inner_req_list[2] = DEFAULT_STREAM_METADATA.copy()
-    inner_req_list[3] = ""
-    inner_req_list[4] = candidate_id
     inner_req_list[6] = [1]
     inner_req_list[7] = 1
     inner_req_list[10] = 1
@@ -217,7 +260,9 @@ def build_stream_generate_payload(prompt, file_data, candidate_id, request_uuid,
     inner_req_list[53] = 0
     inner_req_list[59] = request_uuid
     inner_req_list[61] = []
-    inner_req_list[68] = 2
+    inner_req_list[68] = 1
+    inner_req_list[79] = model_type
+    inner_req_list[80] = thinking_level
     return json.dumps(inner_req_list, separators=(',', ':'))
 
 def load_state_file():
@@ -445,13 +490,14 @@ async def get_snlm0e(force_refresh=False):
         
     if IS_DEBUG: print_sys("[DEBUG] Скачивание главной страницы для получения токена SNlM0e...")
     try:
-        resp = await GLOBAL_CLIENT.get("https://gemini.google.com/app", timeout=30.0)
+        resp = await GLOBAL_CLIENT.get(f"{GEMINI_ORIGIN}/app", timeout=30.0)
+        if resp.status_code != 200 or resp.url.host != "gemini.google.com":
+            print_sys(f"[!] Не удалось открыть Gemini Web для обновления сессии (HTTP {resp.status_code}, хост {resp.url.host}).")
+            return None
         browser_request_context = extract_browser_request_context(resp.text)
-        cache_browser_request_context(browser_request_context)
         print_debug("SNlM0e fetch response", {
             "status_code": resp.status_code,
             "headers": sanitize_headers(resp.headers),
-            "body_preview": resp.text[:4000],
             "browser_request_context": browser_request_context,
         }, max_len=12000)
         match = re.search(r'"SNlM0e":"(.*?)"', resp.text) or re.search(r'\["SNlM0e","(.*?)"\]', resp.text)
@@ -459,6 +505,7 @@ async def get_snlm0e(force_refresh=False):
             print_sys("[❌] КРИТИЧЕСКАЯ ОШИБКА: Токен SNlM0e не найден. Куки протухли или нужен VPN.")
             return None
         CACHED_SNLM0E = match.group(1)
+        cache_browser_request_context(browser_request_context)
         persist_snlm0e(CACHED_SNLM0E)
         if IS_DEBUG: print_sys("[DEBUG] Токен SNlM0e успешно обновлен и кэширован.")
         return CACHED_SNLM0E
@@ -467,14 +514,18 @@ async def get_snlm0e(force_refresh=False):
         return None
 
 async def init_session():
+    global CACHED_SNLM0E, session_initialized, web_client_session_id
+    global browser_request_context_cache, browser_request_context_updated_at
+    global web_model_catalog, web_model_catalog_updated_at
+
     print_sys("[*] Загрузка сессии из google_state.json...")
     GLOBAL_CLIENT.cookies.clear()
     GLOBAL_CLIENT.headers.pop("Authorization", None)
-    global CACHED_SNLM0E, CURRENT_MODEL_ID, CURRENT_THINKING_LEVEL, session_initialized, browser_request_context_cache, browser_request_context_updated_at
     CACHED_SNLM0E = None
-    CURRENT_MODEL_ID = None
-    CURRENT_THINKING_LEVEL = 1
     session_initialized = False
+    web_client_session_id = str(uuid.uuid4()).upper()
+    web_model_catalog = None
+    web_model_catalog_updated_at = 0.0
     with browser_request_context_lock:
         browser_request_context_cache = {}
         browser_request_context_updated_at = 0.0
@@ -493,8 +544,13 @@ async def init_session():
         has_base_cookie = False
         
         for cookie in state.get("cookies", []):
-            if cookie['name'] in ['__Secure-1PSID', '__Secure-1PSIDTS', 'SAPISID']:
-                GLOBAL_CLIENT.cookies.set(cookie['name'], cookie['value'], domain=cookie['domain'])
+            if (
+                cookie['domain'].lstrip('.') in {"google.com", "gemini.google.com"}
+                and cookie['name'] in GEMINI_SESSION_COOKIES
+            ):
+                GLOBAL_CLIENT.cookies.set(
+                    cookie['name'], cookie['value'], domain=cookie['domain'], path=cookie.get('path', '/'),
+                )
                 if cookie['name'] == 'SAPISID':
                     sapisid = cookie['value']
                 if cookie['name'] == '__Secure-1PSID':
@@ -538,6 +594,17 @@ async def init_session():
         print_sys(f"[!] Ошибка чтения файла сессии: {e}")
         return False
 
+async def get_text_request_context(snlm0e):
+    context = get_cached_browser_request_context(max_age_seconds=BROWSER_REQUEST_CONTEXT_TTL_SECONDS)
+    if context:
+        return CACHED_SNLM0E or snlm0e, context
+    if can_refresh_token_from_cookies():
+        refreshed = await get_snlm0e(force_refresh=True)
+        if refreshed:
+            return refreshed, get_cached_browser_request_context()
+    return snlm0e, {}
+
+
 async def keep_alive_worker():
     """Умный фоновый воркер с плавающим интервалом (защита от анти-бота)"""
     while True:
@@ -580,6 +647,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+@app.exception_handler(WebModelError)
+async def web_model_error_handler(request: Request, exc: WebModelError):
+    return JSONResponse(exc.payload(), status_code=exc.status_code)
+
+
 @app.exception_handler(StarletteHTTPException)
 async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
     if exc.status_code == 404:
@@ -598,97 +670,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-async def set_model_preference(snlm0e, mode_id, is_extended=False):
-    if IS_DEBUG: print_sys(f"[DEBUG] Отправка сигнала переключения модели (Mode ID: {mode_id}, Extended: {is_extended})...")
-    url = "https://gemini.google.com/_/BardChatUi/data/batchexecute?rpcids=L5adhe&rt=c"
-    
-    if is_extended:
-        null_array = [None] * 243
-        null_array.append([
-            ["THINKING_LEVEL_EXTENDED", "THINKING_LEVEL_EXTENDED", "THINKING_LEVEL_EXTENDED",
-             "THINKING_LEVEL_STANDARD", "THINKING_LEVEL_EXTENDED", "THINKING_LEVEL_STANDARD",
-             "THINKING_LEVEL_EXTENDED"]
-        ])
-        inner_json_data = [null_array, [["disabled_thinking_level_badge_ids"]]]
-    else:
-        null_array = [None] * 99
-        null_array.append(mode_id)
-        inner_json_data = [null_array, [["last_selected_mode_id_on_web"]]]
-    inner_json_str = json.dumps(inner_json_data, separators=(',', ':'))
-    
-    req_data = {
-        "f.req": json.dumps([[["L5adhe", inner_json_str, None, "generic"]]], separators=(',', ':')),
-        "at": snlm0e
-    }
-    print_debug("Model switch request", {
-        "url": url,
-        "mode_id": mode_id,
-        "headers": sanitize_headers(GLOBAL_CLIENT.headers),
-        "form": req_data,
-        "inner_json": inner_json_str,
-    }, max_len=12000)
-    
-    try:
-        resp = await GLOBAL_CLIENT.post(url, data=req_data, timeout=15.0)
-        print_debug("Model switch response", {
-            "status_code": resp.status_code,
-            "headers": sanitize_headers(resp.headers),
-            "body_preview": resp.text[:4000],
-        }, max_len=12000)
-        if resp.status_code == 200:
-            if "er" in resp.text and "generic" not in resp.text:
-                if IS_DEBUG: print_sys("[-] Сервер вернул 200, но внутри скрытая ошибка! Переключение могло не сработать.")
-                return False
-            if IS_DEBUG: print_sys("[+] Модель на сервере (UI) успешно изменена!")
-            return True
-    except Exception as e:
-        if IS_DEBUG: print_sys(f"[❌] Исключение при переключении модели: {e}")
-    return False
-
-
-async def send_bard_activity_warmup(snlm0e, browser_context=None):
-    params = {
-        "rpcids": "ESY5D",
-        "_reqid": next_stream_generate_reqid(),
-        "rt": "c",
-        "source-path": "/app",
-    }
-    if isinstance(browser_context, dict):
-        if browser_context.get("bl"):
-            params["bl"] = browser_context["bl"]
-        if browser_context.get("f.sid"):
-            params["f.sid"] = browser_context["f.sid"]
-
-    url = f"https://gemini.google.com/_/BardChatUi/data/batchexecute?{httpx.QueryParams(params)}"
-    req_data = {
-        "f.req": json.dumps([[ ["ESY5D", '[[["bard_activity_enabled"]]]', None, "generic"] ]], separators=(',', ':')),
-        "at": snlm0e,
-    }
-    headers = GLOBAL_CLIENT.headers.copy()
-    headers["Origin"] = "https://gemini.google.com"
-    headers["Referer"] = "https://gemini.google.com/"
-    headers["X-Same-Domain"] = "1"
-
-    print_debug("Bard activity warmup request", {
-        "url": url,
-        "headers": sanitize_headers(headers),
-        "form": req_data,
-        "browser_context": browser_context,
-    }, max_len=12000)
-
-    try:
-        resp = await GLOBAL_CLIENT.post(url, data=req_data, headers=headers, timeout=10.0)
-        print_debug("Bard activity warmup response", {
-            "status_code": resp.status_code,
-            "headers": sanitize_headers(resp.headers),
-            "body_preview": resp.text[:4000],
-        }, max_len=12000)
-        return resp.status_code == 200
-    except Exception as e:
-        print_debug("Bard activity warmup exception", repr(e))
-        return False
-
-
 def find_string_with_prefix(obj, prefix):
     if isinstance(obj, str):
         return obj if obj.startswith(prefix) else None
@@ -705,7 +686,7 @@ def find_string_with_prefix(obj, prefix):
     return None
 
 
-def extract_batch_response_payloads(response_text):
+def extract_batch_response_payloads(response_text, rpc_id=None):
     payloads = []
     for line in response_text.splitlines():
         clean_line = line.strip()
@@ -722,11 +703,116 @@ def extract_batch_response_payloads(response_text):
             continue
         for item in parsed_line:
             if isinstance(item, list) and len(item) > 2 and isinstance(item[2], str) and item[2]:
+                if rpc_id is not None and (item[0] != "wrb.fr" or item[1] != rpc_id):
+                    continue
                 try:
                     payloads.append(json.loads(item[2]))
                 except json.JSONDecodeError:
                     continue
     return payloads
+
+
+def parse_web_model_catalog(response_text):
+    # GetUserStatus carries the model list and the session's capacity flags.
+    for payload in extract_batch_response_payloads(response_text, MODEL_CATALOG_RPC):
+        if not isinstance(payload, list) or len(payload) < 16 or not isinstance(payload[15], list):
+            continue
+        tier_flags = payload[16] if len(payload) > 16 and isinstance(payload[16], list) else []
+        capabilities = payload[17] if len(payload) > 17 and isinstance(payload[17], list) else []
+        capacity_field = 12
+        if 21 in tier_flags or 22 in tier_flags:
+            capacity, capacity_field = (1 if 21 in tier_flags else 2), 13
+        elif 115 in capabilities:
+            capacity = 4
+        elif 16 in tier_flags or 106 in capabilities:
+            capacity = 3
+        else:
+            capacity = 2 if 8 in tier_flags or 19 in capabilities else 1
+
+        models = {}
+        for entry in payload[15]:
+            if not isinstance(entry, list) or not entry or not isinstance(entry[0], str):
+                continue
+            model_type = next(
+                (entry[i] for i in (17, 9) if len(entry) > i and type(entry[i]) is int),
+                None,
+            )
+            if not entry[0] or model_type is None:
+                continue
+            # The versioned label may live in a different field from the localized picker title.
+            for i in (19, 12, 11, 2, 1, 10):
+                if len(entry) <= i or not isinstance(entry[i], str):
+                    continue
+                label = entry[i].strip().lower()
+                if re.fullmatch(r"(?:gemini[ -]+)?\d+(?:\.\d+)?[ -]+[a-z][a-z0-9]*(?:[ -]+[a-z0-9]+)*", label):
+                    model_name = re.sub(r" +", "-", label)
+                    if not model_name.startswith("gemini-"):
+                        model_name = f"gemini-{model_name}"
+                    models[model_name] = WebTextModel(entry[0], model_type, capacity, capacity_field)
+                    break
+        return models
+    return None
+
+
+async def get_web_model_catalog(snlm0e, browser_context):
+    global web_model_catalog, web_model_catalog_updated_at
+    async with web_model_catalog_lock:
+        if web_model_catalog is not None and time.monotonic() - web_model_catalog_updated_at < BROWSER_REQUEST_CONTEXT_TTL_SECONDS:
+            return web_model_catalog
+        session_id = web_client_session_id
+        params = {
+            "rpcids": MODEL_CATALOG_RPC, "source-path": "/app", "rt": "c",
+            "_reqid": next_stream_generate_reqid(),
+            "hl": browser_context.get("hl") or get_default_browser_hl(),
+        }
+        params.update({key: browser_context[key] for key in ("bl", "f.sid") if browser_context.get(key)})
+        headers = {
+            "Origin": GEMINI_ORIGIN,
+            "Referer": f"{GEMINI_ORIGIN}/",
+            "x-goog-ext-525001261-jspb": json.dumps(
+                [1, None, None, None, None, None, None, None, [4, 5, 6, 8],
+                 None, None, None, None, None, None, None, session_id],
+                separators=(',', ':'),
+            ),
+            "x-goog-ext-73010989-jspb": "[0]",
+        }
+        try:
+            response = await GLOBAL_CLIENT.post(
+                f"{GEMINI_ORIGIN}/_/BardChatUi/data/batchexecute",
+                params=params, headers=headers, timeout=15.0,
+                data={"f.req": json.dumps([[[MODEL_CATALOG_RPC, "[]", None, "generic"]]]), "at": snlm0e},
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            print_sys(f"[!] Каталог моделей Gemini Web недоступен ({type(exc).__name__}).")
+            return None
+        models = parse_web_model_catalog(response.text)
+        if models is None:
+            print_sys("[!] Gemini Web не вернул каталог моделей для этой сессии.")
+            return None
+        if session_id != web_client_session_id:
+            return None
+        web_model_catalog = models
+        web_model_catalog_updated_at = time.monotonic()
+        return models
+
+
+async def resolve_web_text_model(model_name, snlm0e, browser_context, force_extended):
+    catalog = await get_web_model_catalog(snlm0e, browser_context)
+    if catalog is not None and model_name in catalog and model_name not in LEGACY_TEXT_MODELS:
+        return catalog[model_name], 1
+    legacy_name = normalize_legacy_text_model(model_name, force_extended)
+    legacy_model = LEGACY_TEXT_MODELS.get(legacy_name)
+    if legacy_model:
+        if catalog:
+            legacy_model = catalog.get(legacy_name) or next(
+                (model for model in catalog.values() if model.model_type == legacy_model.model_type),
+                legacy_model,
+            )
+        return legacy_model, 2 if legacy_name.endswith("-extended") else 1
+    if catalog is None:
+        raise WebModelError("Could not load the Gemini Web model list. Check the server logs.", 502, "model_catalog_unavailable")
+    raise WebModelError(f"Model '{model_name}' is not available in this Gemini Web session.", 404, "model_not_found")
 
 
 async def recover_text_from_read_chat(snlm0e, chat_id, browser_context=None, attempts=4):
@@ -1036,6 +1122,17 @@ def find_actual_response(obj):
             if is_better_response_candidate(candidate, best): best = candidate
     return best
 
+
+def extract_stream_candidate_text(payload):
+    # StreamGenerate sends cumulative text in the first candidate, alongside thought summaries and metadata.
+    text = payload
+    for index in (4, 0, 1, 0):
+        if not isinstance(text, list) or len(text) <= index:
+            return ""
+        text = text[index]
+    return text if isinstance(text, str) and text.strip() else ""
+
+
 def normalize_thinking_tags(text, tag_name):
     if not isinstance(text, str):
         return ""
@@ -1279,20 +1376,12 @@ async def generate_text_core(
     file_mime_type="text/plain",
     allow_token_refresh_retry=True,
     allow_desktop_refresh_retry=True,
+    allow_bad_request_retry=True,
+    force_extended=False,
 ):
-    global CURRENT_MODEL_ID, CURRENT_THINKING_LEVEL, CACHED_SNLM0E
     request_debug_id = f"text-{uuid.uuid4().hex[:8]}"
-    
-    print_sys("🚀 [ЭТАП 1] Подготовка данных...")
-    file_data = None
-    if file_content:
-        file_hash = hashlib.sha256(file_content.encode("utf-8")).hexdigest()[:12]
-        filename = file_name or f"conversation-transcript-{request_debug_id}-{file_hash}.txt"
-        doc_id = await upload_document_to_gemini(file_content, filename=filename, mime_type=file_mime_type)
-        if doc_id: file_data = build_attachment_file_data(doc_id, filename=filename, mime_type=file_mime_type)
-        else: print_sys("⚠️ Предупреждение: Не удалось прикрепить transcript-файл истории. Генерация продолжится без него.")
 
-    print_sys("🔑 [ЭТАП 2] Проверка токена и настройка модели...")
+    print_sys("🔑 [ЭТАП 1] Проверка токена и выбор модели...")
     snlm0e, allow_token_refresh_retry, allow_desktop_refresh_retry = await get_or_recover_request_snlm0e(
         "Текстовый запрос",
         allow_token_refresh_retry=allow_token_refresh_retry,
@@ -1301,52 +1390,40 @@ async def generate_text_core(
     if not snlm0e: 
         return None
 
-    mode_id = "56fdd199312815e2"
-    model_type = 1
-    thinking_level = 1
-    is_extended = "extended" in model_name.lower()
-    if is_extended:
-        thinking_level = 2
-    if "pro" in model_name.lower():
-        mode_id = "e6fa609c3fa255c0"
-        model_type = 3
+    snlm0e, browser_request_context = await get_text_request_context(snlm0e)
+    model, thinking_level = await resolve_web_text_model(
+        model_name, snlm0e, browser_request_context, force_extended,
+    )
 
-    if CURRENT_MODEL_ID != mode_id or CURRENT_THINKING_LEVEL != thinking_level:
-        success = await set_model_preference(snlm0e, mode_id, is_extended=is_extended)
-        if success:
-            CURRENT_MODEL_ID = mode_id
-            CURRENT_THINKING_LEVEL = thinking_level
-            await asyncio.sleep(1.0)
-    else:
-        if IS_DEBUG: print_sys(f"[*] Модель уже настроена правильно, пропускаем лишний запрос.")
+    print_sys("📄 [ЭТАП 2] Подготовка данных...")
+    file_data = None
+    if file_content:
+        file_hash = hashlib.sha256(file_content.encode("utf-8")).hexdigest()[:12]
+        filename = file_name or f"conversation-transcript-{request_debug_id}-{file_hash}.txt"
+        doc_id = await upload_document_to_gemini(file_content, filename=filename, mime_type=file_mime_type)
+        if doc_id:
+            file_data = build_attachment_file_data(doc_id, filename=filename, mime_type=file_mime_type)
+        else:
+            print_sys("⚠️ Предупреждение: Не удалось прикрепить transcript-файл истории. Генерация продолжится без него.")
 
-    candidate_id = uuid.uuid4().hex
     request_uuid = str(uuid.uuid4()).upper()
     stream_generate_reqid = next_stream_generate_reqid()
-    browser_request_context = get_cached_browser_request_context(max_age_seconds=BROWSER_REQUEST_CONTEXT_TTL_SECONDS)
-    browser_context_missing_required_fields = not browser_request_context.get("bl") or not browser_request_context.get("f.sid")
-    if browser_context_missing_required_fields and can_refresh_token_from_cookies():
-        print_debug(f"{request_debug_id} browser request context refresh", {
-            "reason": "missing_or_stale_browser_context",
-            "current_browser_request_context": browser_request_context,
-        })
-        refreshed_snlm0e = await get_snlm0e(force_refresh=True)
-        if refreshed_snlm0e:
-            snlm0e = refreshed_snlm0e
-        browser_request_context = get_cached_browser_request_context(max_age_seconds=BROWSER_REQUEST_CONTEXT_TTL_SECONDS)
-
     stream_url = build_stream_generate_url(browser_request_context, reqid=stream_generate_reqid)
-    language = browser_request_context.get("hl") if isinstance(browser_request_context, dict) and browser_request_context.get("hl") else get_default_browser_hl()
-    await send_bard_activity_warmup(snlm0e, browser_request_context)
+    language = browser_request_context.get("hl") or get_default_browser_hl()
 
-    payload_str = build_stream_generate_payload(prompt, file_data, candidate_id, request_uuid, language, IS_TEMP_CHAT)
+    payload_str = build_stream_generate_payload(
+        prompt, file_data, request_uuid, language, IS_TEMP_CHAT, model.model_type, thinking_level,
+    )
     req_data = {"f.req": json.dumps([None, payload_str], separators=(',', ':')), "at": snlm0e}
 
-    req_headers = build_stream_generate_headers(GLOBAL_CLIENT.headers, mode_id, request_uuid, model_type=model_type, thinking_level=thinking_level)
+    req_headers = build_stream_generate_headers(
+        GLOBAL_CLIENT.headers, model.mode_id, request_uuid,
+        model_type=model.model_type, thinking_level=thinking_level,
+        capacity=model.capacity, capacity_field=model.capacity_field, client_session_id=web_client_session_id,
+    )
     print_debug(f"{request_debug_id} prepared text request", {
         "model_name": model_name,
-        "mode_id": mode_id,
-        "candidate_id": candidate_id,
+        "mode_id": model.mode_id,
         "request_uuid": request_uuid,
         "stream_generate_reqid": stream_generate_reqid,
         "browser_request_context": browser_request_context,
@@ -1379,7 +1456,18 @@ async def generate_text_core(
                 print_debug(f"{request_debug_id} non-200 stream body", error_body, max_len=20000)
                 spinner.cancel()
                 print_sys(f"[❌] ОШИБКА GOOGLE API: Сервер вернул статус HTTP {resp.status_code}")
-                if resp.status_code in [400, 401, 403]:
+                if resp.status_code == 400 and allow_bad_request_retry and can_refresh_token_from_cookies():
+                    refreshed = await get_snlm0e(force_refresh=True)
+                    if refreshed and refreshed != snlm0e:
+                        return await generate_text_core(
+                            request, prompt, model_name=model_name, file_content=file_content,
+                            file_name=file_name, file_mime_type=file_mime_type,
+                            allow_token_refresh_retry=allow_token_refresh_retry,
+                            allow_desktop_refresh_retry=allow_desktop_refresh_retry,
+                            allow_bad_request_retry=False,
+                            force_extended=force_extended,
+                        )
+                if resp.status_code in (401, 403):
                     recovered, next_token_retry, next_desktop_refresh_retry = await recover_request_snlm0e(
                         "Текстовый запрос",
                         allow_token_refresh_retry=allow_token_refresh_retry,
@@ -1395,6 +1483,8 @@ async def generate_text_core(
                             file_mime_type=file_mime_type,
                             allow_token_refresh_retry=next_token_retry,
                             allow_desktop_refresh_retry=next_desktop_refresh_retry,
+                            allow_bad_request_retry=allow_bad_request_retry,
+                            force_extended=force_extended,
                         )
                 return None
                 
@@ -1412,22 +1502,16 @@ async def generate_text_core(
                         if clean_line.startswith('['):
                             parsed_data = json.loads(clean_line)
                             print_debug_throttled(f"{request_debug_id}:parsed-stream-item", f"{request_debug_id} parsed stream item #{raw_line_count}", parsed_data, max_len=16000)
-                            if isinstance(parsed_data, list) and len(parsed_data) > 0 and isinstance(parsed_data[0], list):
-                                item = parsed_data[0]
-                                if len(item) > 2 and item[0] == "wrb.fr":
-                                    inner_json_str = item[2]
-                                    if inner_json_str:
-                                        print_debug_throttled(f"{request_debug_id}:inner-json-str", f"{request_debug_id} inner_json_str #{raw_line_count}", inner_json_str, max_len=16000)
-                                        inner_data = json.loads(inner_json_str)
-                                        print_debug_throttled(f"{request_debug_id}:inner-json-parsed", f"{request_debug_id} inner_json parsed #{raw_line_count}", inner_data, max_len=16000)
-                                        recovery_chat_id = recovery_chat_id or find_string_with_prefix(inner_data, "c_")
-                                        extracted = find_actual_response(inner_data)
-                                        print_debug_throttled(f"{request_debug_id}:extracted-candidate", f"{request_debug_id} extracted candidate #{raw_line_count}", {
-                                            "length": len(extracted),
-                                            "preview": extracted[:4000],
-                                        }, max_len=12000)
-                                        if is_better_response_candidate(extracted, full_text):
-                                            full_text = extracted
+                            if not isinstance(parsed_data, list):
+                                continue
+                            for item in parsed_data:
+                                if not isinstance(item, list) or len(item) < 3 or item[0] != "wrb.fr" or not item[2]:
+                                    continue
+                                inner_data = json.loads(item[2])
+                                recovery_chat_id = recovery_chat_id or find_string_with_prefix(inner_data, "c_")
+                                extracted = extract_stream_candidate_text(inner_data)
+                                if extracted:
+                                    full_text = extracted
                     except Exception as e:
                         print_debug(f"{request_debug_id} stream parse exception #{raw_line_count}", repr(e))
                         continue
@@ -1446,22 +1530,6 @@ async def generate_text_core(
             if recovered_text:
                 print_sys("[+] Ответ восстановлен через READ_CHAT после пустого потока.")
                 return recovered_text
-            recovered, next_token_retry, next_desktop_refresh_retry = await recover_request_snlm0e(
-                "Текстовый запрос (пустой ответ)",
-                allow_token_refresh_retry=allow_token_refresh_retry,
-                allow_desktop_refresh_retry=allow_desktop_refresh_retry,
-            )
-            if recovered:
-                return await generate_text_core(
-                    request,
-                    prompt,
-                    model_name=model_name,
-                    file_content=file_content,
-                    file_name=file_name,
-                    file_mime_type=file_mime_type,
-                    allow_token_refresh_retry=next_token_retry,
-                    allow_desktop_refresh_retry=next_desktop_refresh_retry,
-                )
             return None
             
         print_sys(f"[+] Сырой текст успешно извлечен (Длина: {len(full_text)} символов).")
@@ -1475,27 +1543,13 @@ async def generate_text_core(
 
         if not clean_text:
             print_sys("[❌] ОШИБКА: После очистки ответ от Google оказался пустым!")
-            recovered, next_token_retry, next_desktop_refresh_retry = await recover_request_snlm0e(
-                "Текстовый запрос (пустой ответ после очистки)",
-                allow_token_refresh_retry=allow_token_refresh_retry,
-                allow_desktop_refresh_retry=allow_desktop_refresh_retry,
-            )
-            if recovered:
-                return await generate_text_core(
-                    request,
-                    prompt,
-                    model_name=model_name,
-                    file_content=file_content,
-                    file_name=file_name,
-                    file_mime_type=file_mime_type,
-                    allow_token_refresh_retry=next_token_retry,
-                    allow_desktop_refresh_retry=next_desktop_refresh_retry,
-                )
             return None
 
         return clean_text
     except asyncio.CancelledError:
         print_sys("🛑 [ОТМЕНЕНО] Генерация текста принудительно остановлена.")
+        raise
+    except WebModelError:
         raise
     except httpx.ReadTimeout:
         spinner.cancel()
@@ -1876,7 +1930,7 @@ async def generate_image_core(request: Request, prompt, reference_images_b64=Non
 def is_image_model(model_name):
     return "nano-banana" in str(model_name or "").lower()
 
-def normalize_requested_model(model_name, force_extended=False):
+def normalize_requested_model(model_name):
     normalized = str(model_name or "").strip().lower()
 
     if normalized.startswith("/v1beta/models/"):
@@ -1887,29 +1941,22 @@ def normalize_requested_model(model_name, force_extended=False):
         normalized = normalized[len("models/"):]
     if ":" in normalized:
         normalized = normalized.split(":", 1)[0]
-
-    # Картиночные nano-banana-модели пропускаем как есть — для них своя ветка.
-    if "nano-banana" in normalized:
-        return normalized
-
-    is_pro = "pro" in normalized
-    is_flash = "flash" in normalized
-    is_thinking = any(token in normalized for token in ("extended", "thinking", "think"))
-
-    if force_extended:
-        # v1beta: всё сводим к extended-моделям
-        if is_pro:
-            return "gemini-3.1-pro-extended"
-        if is_flash:
-            return "gemini-3.5-flash-extended"
-        return normalized
-
-    # v1: чёткое разделение pro/flash + extended/preview
-    if is_pro:
-        return "gemini-3.1-pro-extended" if is_thinking else "gemini-3.1-pro-preview"
-    if is_flash:
-        return "gemini-3.5-flash-extended" if is_thinking else "gemini-3.5-flash"
     return normalized
+
+
+def normalize_legacy_text_model(model_name, force_extended=False):
+    if model_name == "nano-banana-pro":
+        return "gemini-3.1-pro-preview"
+    if model_name == "nano-banana-2":
+        return "gemini-3.5-flash"
+
+    is_thinking = force_extended or any(token in model_name for token in ("extended", "thinking", "think"))
+
+    if model_name.startswith("gemini-") and "pro" in model_name:
+        return "gemini-3.1-pro-extended" if is_thinking else "gemini-3.1-pro-preview"
+    if model_name.startswith("gemini-") and "flash" in model_name:
+        return "gemini-3.5-flash-extended" if is_thinking else "gemini-3.5-flash"
+    return model_name
 
 def coerce_message_content_to_text(content):
     """Превращает любое поле `content` (OpenAI-стиля) в плоскую строку.
@@ -2352,17 +2399,17 @@ async def handle_gemini_text_generation(request: Request, data, requested_model,
         latest_user_text=latest_user_text,
         prefill_text=prefill_text,
     )
-    effective_model = normalize_requested_model(requested_model, force_extended=False)
-
     if stream:
         return StreamingResponse(
             gemini_stream_generate_content(
-                request, safe_prompt, effective_model, file_content, prefill_text
+                request, safe_prompt, requested_model, file_content, prefill_text
             ),
             media_type="text/event-stream",
         )
 
-    generated_text = await generate_text_core(request, safe_prompt, model_name=effective_model, file_content=file_content)
+    generated_text = await generate_text_core(
+        request, safe_prompt, model_name=requested_model, file_content=file_content, force_extended=True,
+    )
     if generated_text is None:
         return JSONResponse({"error": {"message": "Failed to generate text. Check server logs for details.", "type": "server_error"}}, status_code=500)
 
@@ -2388,7 +2435,9 @@ async def gemini_stream_generate_content(request: Request, safe_prompt, effectiv
     но клиенту это видно как корректный SSE-поток, аналогично OpenAI-ветке.
     """
     task = asyncio.create_task(
-        generate_text_core(request, safe_prompt, model_name=effective_model, file_content=file_content)
+        generate_text_core(
+            request, safe_prompt, model_name=effective_model, file_content=file_content, force_extended=True,
+        )
     )
     try:
         while not task.done():
@@ -2407,6 +2456,9 @@ async def gemini_stream_generate_content(request: Request, safe_prompt, effectiv
             generated_text = task.result()
         except asyncio.CancelledError:
             print_sys("🏁 ЗАВЕРШЕНО. Gemini-стрим был отменен клиентом.")
+            return
+        except WebModelError as exc:
+            yield f"data: {json.dumps(exc.payload())}\n\n"
             return
         except Exception as e:
             print_sys(f"[❌] ОШИБКА ФОНОВОЙ GEMINI-ГЕНЕРАЦИИ: {e}")
@@ -2447,19 +2499,36 @@ async def list_models(request: Request):
     token, _ = start_api_request_logging(request, "models")
     try:
         print_sys(f"\n{'='*50}\n🔍 ЗАПРОС СПИСКА МОДЕЛЕЙ\n{'='*50}")
-        models = [
-            {"id": "nano-banana-pro", "object": "model", "created": 1712050000, "owned_by": "google"},
-            {"id": "nano-banana-2", "object": "model", "created": 1712050000, "owned_by": "google"},
-            {"id": "gemini-3.5-flash", "object": "model", "created": 1712050000, "owned_by": "google"},
-            {"id": "gemini-3.5-flash-extended", "object": "model", "created": 1712050000, "owned_by": "google"},
-            {"id": "gemini-3.1-pro-preview", "object": "model", "created": 1712050000, "owned_by": "google"},
-            {"id": "gemini-3.1-pro-extended", "object": "model", "created": 1712050000, "owned_by": "google"}
-        ]
-        for m in models:
-            print_sys(f"  - {m['id']}")
+        catalog = None
+        snlm0e = await get_snlm0e()
+        if snlm0e or can_refresh_token_from_cookies():
+            snlm0e, browser_context = await get_text_request_context(snlm0e)
+            if snlm0e:
+                catalog = await get_web_model_catalog(snlm0e, browser_context)
+        new_models = [model for model in (catalog or {}) if model not in LEGACY_TEXT_MODELS]
+        model_ids = [*new_models, *LEGACY_TEXT_MODELS, "nano-banana-pro", "nano-banana-2"]
+        for model in model_ids:
+            print_sys(f"  - {model}")
         print_sys("[+] Список моделей успешно отправлен в клиент.")
 
-        return JSONResponse({"object": "list", "data": models, "models": models})
+        openai_models = [
+            {"id": model, "object": "model", "created": 1712050000, "owned_by": "google"}
+            for model in model_ids
+        ]
+        if request.url.path.startswith("/v1beta/"):
+            gemini_models = [
+                {
+                    **item,
+                    "name": f"models/{item['id']}",
+                    "displayName": item["id"],
+                    "supportedGenerationMethods": (
+                        ["generateContent"] if is_image_model(item["id"]) else ["generateContent", "streamGenerateContent"]
+                    ),
+                }
+                for item in openai_models
+            ]
+            return JSONResponse({"object": "list", "data": openai_models, "models": gemini_models})
+        return JSONResponse({"object": "list", "data": openai_models, "models": openai_models})
     finally:
         reset_request_log(token)
 
@@ -2491,7 +2560,7 @@ async def unified_image_generation(request: Request, model: str = None):
         requested_model = body_model or model or "nano-banana-pro"
         is_v1beta = request.url.path.startswith('/v1beta/')
         is_stream_path = ':streamGenerateContent' in request.url.path
-        effective_model = normalize_requested_model(requested_model, force_extended=is_v1beta)
+        effective_model = normalize_requested_model(requested_model)
         reference_images_b64 = []
 
         if is_v1beta:
@@ -2621,7 +2690,7 @@ async def chat_completions(request: Request):
             return JSONResponse({"error": "No text content provided"}, status_code=400)
 
         requested_model = str(data.get('model', 'nano-banana-pro')).lower()
-        effective_model = normalize_requested_model(requested_model, force_extended=False)
+        effective_model = normalize_requested_model(requested_model)
         is_stream = data.get('stream', False)
         print_debug("Chat completions resolved request", {
             "requested_model": requested_model,
@@ -2687,6 +2756,10 @@ async def chat_completions(request: Request):
                         generated_text = task.result()
                     except asyncio.CancelledError:
                         print_sys(f"🏁 ЗАВЕРШЕНО. Стрим был отменен клиентом.\n{'='*50}")
+                        return
+                    except WebModelError as exc:
+                        yield f"data: {json.dumps(exc.payload())}\n\n"
+                        yield "data: [DONE]\n\n"
                         return
                     except Exception as e:
                         print_sys(f"[❌] ОШИБКА ФОНОВОЙ ГЕНЕРАЦИИ: {e}")
