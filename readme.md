@@ -55,12 +55,14 @@
 
 ## 🤖 Модели
 
-API автоматически отправляет скрытые сигналы переключения моделей.
+Прокси читает каталог из Gemini Web для текущего аккаунта. После запуска обновите список моделей в SillyTavern и выберите `gemini-4-neon` или `gemini-4-hydrogen`. Обе модели работают через OpenAI-совместимый и Gemini-совместимый API, в том числе с потоковой выдачей SSE.
 
 ### Доступные модели
 
 | ID | Описание | Подписка |
 |----|----------|----------|
+| `gemini-4-hydrogen` | Быстрая текстовая модель. | По доступности в Gemini Web |
+| `gemini-4-neon` | Текстовая модель для более глубокого анализа. | По доступности в Gemini Web |
 | `gemini-3.5-flash` | Базовая, очень быстрая текстовая модель. | Нет |
 | `gemini-3.5-flash-extended` | Расширенное рассуждение (Thinking). | Нет |
 | `gemini-3.1-pro-preview` | Тяжёлая, максимально умная модель. | Да (Pro) |
@@ -68,7 +70,7 @@ API автоматически отправляет скрытые сигнал�
 | `nano-banana-2` | Простая бесплатная модель. | Нет |
 | `nano-banana-pro` | Продвинутая модель для картинок. | Да (Pro) |
 
-### Alias-имена (синонимы)
+### Прежние имена моделей
 
 **При подключении через `/v1/chat/completions` (OpenAI-совместимый):**
 - `gemini-3.5-flash` → `gemini-3.5-flash` (базовая)
@@ -81,8 +83,8 @@ API автоматически отправляет скрытые сигнал�
 - `gemini-3-pro-extended` → `gemini-3.1-pro-extended`
 
 **При подключении через `/v1beta/models/...` (Gemini API):**
-- **ВСЕ** Flash-модели → `gemini-3.5-flash-extended`
-- **ВСЕ** Pro-модели → `gemini-3.1-pro-extended`
+- Прежние имена Flash → `gemini-3.5-flash-extended`
+- Прежние имена Pro → `gemini-3.1-pro-extended`
 
 > *Без подписки Pro-модели Google может тихо перенаправить на бесплатную Flash.*
 
@@ -314,12 +316,14 @@ This project is **for educational purposes only**. It uses reverse engineering o
 
 ## 🤖 Models
 
-The API automatically sends hidden model-switching signals.
+The proxy reads the Gemini Web model catalog for the signed-in account. Refresh the model list in SillyTavern after starting the proxy and select `gemini-4-neon` or `gemini-4-hydrogen`. Both models support the OpenAI-compatible and Gemini-compatible APIs, including SSE streaming.
 
 ### Available Models
 
 | ID | Description | Subscription |
 |----|-------------|--------------|
+| `gemini-4-hydrogen` | Fast text model. | As available in Gemini Web |
+| `gemini-4-neon` | Text model for deeper analysis. | As available in Gemini Web |
 | `gemini-3.5-flash` | Basic, very fast text model. | No |
 | `gemini-3.5-flash-extended` | Extended reasoning (Thinking). | No |
 | `gemini-3.1-pro-preview` | Heavy, maximally smart model. | Yes (Pro) |
@@ -327,7 +331,7 @@ The API automatically sends hidden model-switching signals.
 | `nano-banana-2` | Simple free model. | No |
 | `nano-banana-pro` | Advanced image generation model. | Yes (Pro) |
 
-### Model Aliases
+### Legacy Model Aliases
 
 **When connecting via `/v1/chat/completions` (OpenAI-compatible):**
 - `gemini-3.5-flash` → `gemini-3.5-flash` (basic)
@@ -340,8 +344,8 @@ The API automatically sends hidden model-switching signals.
 - `gemini-3-pro-extended` → `gemini-3.1-pro-extended`
 
 **When connecting via `/v1beta/models/...` (Gemini API):**
-- **ALL** Flash models → `gemini-3.5-flash-extended`
-- **ALL** Pro models → `gemini-3.1-pro-extended`
+- Legacy Flash names → `gemini-3.5-flash-extended`
+- Legacy Pro names → `gemini-3.1-pro-extended`
 
 > *Without a subscription, Google may silently redirect Pro models to the free Flash version.*
 
